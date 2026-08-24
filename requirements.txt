@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+supabase
+apscheduler
+httpx
+pydantic
+python-dotenv
+razorpay
+google-generativeai
+elevenlabs
+pytest
