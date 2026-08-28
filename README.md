@@ -113,6 +113,28 @@ _Populated after the final run:_
 
 Plus a full exception list: every unrecovered case, grouped by reason, with why.
 
+## What's real vs simulated
+
+**Real:**
+- Razorpay test-mode API calls — real HTTP requests, real payment link IDs,
+  real webhook payloads and signatures. Test mode means no money moves; it does
+  not mean mocked.
+- Postgres constraints doing real work — a UNIQUE idempotency key prevents
+  double-charges at the database level; an append-only trigger rejects any
+  attempt to alter the audit log.
+- Hinglish transcription on real recorded audio.
+- All decision logic: salary-day timing, reason-aware retries, governance gates.
+
+**Simulated:**
+- The population of 400 at-risk cases. No merchant has 300 real failed debits
+  available for a two-week build, and the track asks for measured recovery
+  across a batch. Reason distributions are modelled on published Indian UPI
+  AutoPay failure data.
+- Outreach delivery. Messages are composed and persisted exactly as they would
+  be sent; the WhatsApp/SMS send is stubbed at the transport layer.
+- Customer responses, drawn from a hidden ground-truth model the pipeline never
+  reads. Only the outcome simulator sees it — the agent decides blind.
+
 ## Repo map
 
 ```

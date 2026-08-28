@@ -30,6 +30,14 @@ app.add_middleware(
 def health():
     return {"status": "ok", "service": "wapsi"}
 
+@app.get("/")
+def root():
+    return {
+        "service": "वापसी (Wapsi) — Revenue Recovery Agent",
+        "health": "/health",
+        "docs": "/docs",
+    }
+
 
 @app.post("/webhooks/razorpay")
 async def razorpay_webhook(request: Request):
