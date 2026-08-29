@@ -354,3 +354,91 @@ def test_mandate_debit_notice_itself_is_blocked_by_opt_out(fake_repo):
     assert result["executed"] is False
     assert result["gate"] == "G2"
     assert fake_repo.outreach == []
+
+
+# ---------------------------------------------------------------------------
+# the gate is the sole authority: G3/G5/G6 translate into a terminal outcome
+# or a retry, exactly as app/decision/engine.py now expects. The engine
+# itself proposes without checking any of these three (see test_decision.py);
+# actions.execute() is where the bound actually binds.
+# ---------------------------------------------------------------------------
+
+def test_g3_block_translates_to_escalated(fake_repo):
+    # G3 only gates money-type actions; bank_downtime's cap is 3, so
+    # attempts_made=3 makes this attempt #4. is_mandate_debit=False keeps
+    # this a direct unit test of the gate translation, not the notice flow.
+    case = make_case(reason_category="bank_downtime", attempts_made=3)
+    decision = make_decision(intervention="retry_after_date", is_mandate_debit=False)
+
+    result = actions.execute(decision, case, DEFAULT_POLICY, live=False, now=NOW)
+
+    assert result["executed"] is True
+    assert result["intervention"] == "escalate"
+    # gate_block_counts must be able to see G3 fired here — losing this to
+    # _apply_terminal's default "gate": None would silently undercount the
+    # very bound this restructure exists to make visible.
+    assert result["gate"] == "G3"
+    assert any(u.get("state") == "ESCALATED" for u in fake_repo.case_updates)
+    assert fake_repo.attempts_by_key == {}
+    assert fake_repo.outreach == []  # never sent — blocked before execution
+
+
+def test_g5_block_translates_to_closed_lost(fake_repo):
+    case = make_case(created_at=(NOW - timedelta(days=20)).isoformat())  # grace is 14 days
+    decision = make_decision(intervention="send_link")
+
+    result = actions.execute(decision, case, DEFAULT_POLICY, live=False, now=NOW)
+
+    assert result["executed"] is True
+    assert result["intervention"] == "close_lost"
+    assert result["gate"] == "G5"
+    assert any(u.get("state") == "CLOSED_LOST" for u in fake_repo.case_updates)
+
+
+def test_g5_block_on_the_pre_debit_notice_itself_also_closes_lost(fake_repo):
+    """A mandate-debit case aged past grace shouldn't even get its notice
+    sent — G5 has no is_money/is_outreach guard, so it applies there too."""
+    case = make_case(
+        reason_category="insufficient_funds", created_at=(NOW - timedelta(days=20)).isoformat(),
+    )
+    decision = make_decision(intervention="retry_after_date", is_mandate_debit=True)
+
+    result = actions.execute(decision, case, DEFAULT_POLICY, live=False, now=NOW)
+
+    assert result["executed"] is True
+    assert result["intervention"] == "close_lost"
+    assert result["gate"] == "G5"
+    assert fake_repo.outreach == []
+
+
+def test_g6_block_retries_without_the_discount_and_still_sends_a_link(fake_repo):
+    strict_policy = {**DEFAULT_POLICY, "max_discount_pct": 5.0}
+    case = make_case(reason_category="checkout_dropoff", source="checkout", attempts_made=1)
+    decision = make_decision(
+        intervention="send_link_with_offer", discount_pct=15.0,
+        message="khaas aapke liye 15% off!",
+    )
+
+    result = actions.execute(decision, case, strict_policy, live=False, now=NOW)
+
+    assert result["executed"] is True
+    assert result["intervention"] == "send_link_with_offer"
+    assert len(fake_repo.outreach) == 1
+    sent = fake_repo.outreach[0]
+    assert "15%" not in sent["message"]  # the discount-bearing copy must not go out
+    assert len(fake_repo.attempts_by_key) == 1
+
+
+def test_g6_block_escalates_if_even_the_stripped_retry_is_blocked(fake_repo):
+    # discount trips G6 first; once stripped to 0, the amount still trips G7.
+    strict_policy = {**DEFAULT_POLICY, "max_discount_pct": 5.0, "max_exposure_inr": 100.0}
+    case = make_case(reason_category="checkout_dropoff", source="checkout", attempts_made=1, amount=499.0)
+    decision = make_decision(intervention="send_link_with_offer", discount_pct=15.0, amount=499.0)
+
+    result = actions.execute(decision, case, strict_policy, live=False, now=NOW)
+
+    assert result["executed"] is True
+    assert result["intervention"] == "escalate"
+    assert result["gate"] == "G6"
+    assert fake_repo.outreach == []
+    assert fake_repo.attempts_by_key == {}

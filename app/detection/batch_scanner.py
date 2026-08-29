@@ -37,6 +37,7 @@ import calendar
 import contextlib
 import json
 import os
+import random
 import time
 from collections import Counter
 from dataclasses import dataclass
@@ -216,18 +217,32 @@ def run_batch(
         next_action_at: dict[str, datetime] = {case_id: clock.now for case_id in cases}
         decision_cache: dict[str, dict] = {}
         gate_block_counts: Counter = Counter()
+        # Cases whose opt-out has already had its one confirming pass through
+        # the gate (G2) — only these are skipped outright. A case that JUST
+        # opted out still gets one more _process_case call so G2 actually
+        # fires and lands in the audit trail, instead of being silently
+        # enforced by this loop filter alone.
+        opt_out_gate_confirmed: set[str] = set()
 
         for day_no in range(1, horizon_days + 1):
             today = clock.now
             _resolve_due_promises(cases, clock)
 
             for case_id, case in list(cases.items()):
-                if case["state"] in _TERMINAL_STATES or case.get("opted_out"):
+                if case["state"] in _TERMINAL_STATES:
+                    continue
+                if case.get("opted_out") and case_id in opt_out_gate_confirmed:
                     continue
                 due = next_action_at.get(case_id, today)
                 if due.date() > today.date():
                     continue
+                was_opted_out = bool(case.get("opted_out"))
                 _process_case(case, clock, live, next_action_at, decision_cache, gate_block_counts)
+                if was_opted_out:
+                    # opted_out was already true when _process_case ran, so
+                    # whatever gate_check it hit saw it and G2 fired — this
+                    # case's confirming pass is done, skip it from now on.
+                    opt_out_gate_confirmed.add(case_id)
 
             active = sum(1 for c in cases.values() if c["state"] not in _TERMINAL_STATES and not c.get("opted_out"))
             recovered = sum(1 for c in cases.values() if c["state"] == "RECOVERED")
@@ -306,7 +321,6 @@ def _process_case(
         repository.update_case(case_id, state="DIAGNOSED", reason_category=category)
 
     decision = decision_cache.get(case_id) or engine.decide(case, [], policy, now=now)
-    intervention = decision["intervention"]
     scheduled = _parse_ts(decision.get("scheduled_for"))
 
     if decision.get("is_mandate_debit"):
@@ -319,6 +333,16 @@ def _process_case(
             # sending it early never hurts.
             result = actions.execute(decision, case, policy, live=live, now=now)
             _tally_gate(result, gate_block_counts)
+
+            # The notice-send is itself a governed action: a G5 block (case
+            # aged past the grace period) translates straight to CLOSED_LOST
+            # instead of the generic "keep waiting" path below.
+            result_intervention = result.get("intervention")
+            if result_intervention == "close_lost":
+                case["state"] = "CLOSED_LOST"
+                decision_cache.pop(case_id, None)
+                return
+
             retry_at = _parse_ts(result.get("retry_at"))
             next_action_at[case_id] = retry_at or (now + timedelta(days=1))
             case["state"] = "SCHEDULED"
@@ -348,15 +372,21 @@ def _process_case(
     result = actions.execute(decision, case, policy, live=live, now=now)
     _tally_gate(result, gate_block_counts)
 
-    if not result.get("executed") or result.get("reused"):
-        next_action_at[case_id] = now + timedelta(days=1)
-        return
+    # What actually happened, not what the decision originally proposed: a
+    # G3/G6-escalate or G5 block translates the intervention actions.py
+    # returns, which can differ from `intervention` above (e.g. a
+    # retry_after_date that got G3-blocked comes back as "escalate").
+    result_intervention = result.get("intervention")
 
-    if intervention == "escalate":
+    if result.get("escalated") or result_intervention == "escalate":
         case["state"] = "ESCALATED"
         return
-    if intervention == "close_lost":
+    if result_intervention == "close_lost":
         case["state"] = "CLOSED_LOST"
+        return
+
+    if not result.get("executed") or result.get("reused"):
+        next_action_at[case_id] = now + timedelta(days=1)
         return
 
     case["attempts_made"] = int(case.get("attempts_made") or 0) + 1
@@ -368,13 +398,13 @@ def _process_case(
         case["recovered_amount"] = amount
         case["recovered_at"] = now.isoformat()
         repository.mark_recovered(case_id, amount)
-        audit_log.record(case_id, _ACTOR, audit_log.RECOVERED, reasoning=f"Recovered via {intervention}.")
+        audit_log.record(case_id, _ACTOR, audit_log.RECOVERED, reasoning=f"Recovered via {result_intervention}.")
         return
 
     if case["state"] in ("PROMISE_MADE", "ESCALATED"):
         return  # _simulate_outcome's reply routing already moved it there
 
-    case["state"] = actions._NEXT_STATE.get(intervention, case["state"])
+    case["state"] = actions._NEXT_STATE.get(result_intervention, case["state"])
     next_action_at[case_id] = now + timedelta(days=1)
 
 
@@ -554,18 +584,44 @@ def _compute_ceiling(cases: list[dict]) -> dict:
 # no promises. What most merchants actually do.
 # ---------------------------------------------------------------------------
 
+# ASSUMPTION (documented, not tuned to flatter our own numbers): a blind
+# immediate retry on insufficient_funds is not automatically doomed. Some
+# slice of customers will have topped up, or had an unrelated credit land,
+# in the gap between the original failure and a same-day naive retry,
+# entirely independent of our own salary-day timing model. 35% is a
+# deliberately generous "modest chance" reading of that — high enough that
+# the naive baseline isn't a strawman, low enough that it's still clearly
+# what "no timing intelligence" looks like. Because insufficient_funds
+# dominates the reason mix, this single number is what keeps the naive
+# baseline in a believable ~12-18% recovery range instead of collapsing to
+# ~5% (making our lift look implausibly large) or drifting so high naive
+# stops reading as "naive."
+_NAIVE_TOPUP_CHANCE = 0.35
+
+
 def naive_baseline(set_name: str = "dev") -> dict:
     """
     Reads the dataset directly (no DB writes, no pipeline run) and judges
-    each case against latent as if it got exactly one immediate retry:
-      - mandate_revoked / expired_card: physically can't succeed by retrying
-        the same broken payment method, no matter when.
-      - insufficient_funds / bank_downtime: an immediate retry is always too
-        early against this model's timing gates (that's the whole point of
-        the smart strategy).
+    each case against latent as if it got exactly one immediate retry, with
+    no timing intelligence, no outreach, and no promise handling — what most
+    merchants actually do:
+      - insufficient_funds: recovers only if the case is fundamentally
+        recoverable AND, independent of timing, the customer happened to
+        already have funds (_NAIVE_TOPUP_CHANCE — see comment above).
+      - bank_downtime: recovers only if the outage had already cleared by
+        the moment of the retry (latent resolves_after_days == 0). This
+        dataset's generator draws resolves_after_days from 1-3 days, so in
+        practice this is ~never — realistic: an outage essentially never
+        clears in the same instant as the original failure.
+      - mandate_revoked / expired_card: can never recover — retrying the
+        exact same broken payment method changes nothing, no matter when.
       - checkout_dropoff: no outreach at all means no nudge, no link, no
         conversion.
-      - technical_other: no modeled timing gate, so a plain retry has a shot.
+      - technical_other: no modeled timing gate, so a plain retry has a shot
+        whenever the case is fundamentally recoverable.
+    The topup chance is drawn from a per-case-id-seeded RNG, so re-running
+    naive_baseline() on the same dataset always gives the same result —
+    the same reproducibility discipline as the dataset's own generation.
     """
     cases = _load_dataset(set_name)
     recovered_count = 0
@@ -586,7 +642,23 @@ def _naive_recovers(case: dict) -> bool:
     latent = case.get("latent") or {}
     if not latent.get("recoverable"):
         return False
-    return case.get("reason_category") == "technical_other"
+
+    reason = case.get("reason_category")
+
+    if reason == "technical_other":
+        return True
+
+    if reason == "insufficient_funds":
+        rng = random.Random(f"naive-topup:{case.get('id')}")
+        return rng.random() < _NAIVE_TOPUP_CHANCE
+
+    if reason == "bank_downtime":
+        return latent.get("resolves_after_days") == 0
+
+    # mandate_revoked, expired_card, checkout_dropoff (and anything
+    # unrecognised): a blind immediate retry with no other action can never
+    # succeed here.
+    return False
 
 
 # ---------------------------------------------------------------------------

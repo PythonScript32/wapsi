@@ -7,12 +7,26 @@ Flow for EVERY action:
      f"{case_id}:{intervention}:{attempt_no}"
   3. governance.policy_gate.check(...)
   4. audit.log.gate(...)                — log EVERY verdict, allow or block
-  5. If blocked: return without touching money, outreach, or state
+  5. If blocked: translate G3/G5 into a terminal outcome, retry G6 without
+     the discount, or (any other gate) return without touching money,
+     outreach, or state
   6. If allowed: persist the money attempt and/or the outreach message,
      execute (Razorpay call, or 'send' outreach = simulate + persist)
   7. repository.increment_attempts(case_id)
   8. audit.log.money_action(...) / audit.log.record(...OUTREACH_SENT...)
   9. Advance the case state
+
+THE GATE IS THE SOLE AUTHORITY ON BOUNDS
+------------------------------------------
+app/decision/engine.py proposes the intervention a reason category WANTS,
+with no attempt-cap, grace-period, or discount-cap check of its own — those
+three bounds are enforced here, at the gate, exactly once:
+  G3 (attempt cap)    -> ESCALATED
+  G5 (grace period)   -> CLOSED_LOST
+  G6 (discount cap)   -> re-propose the same action with discount_pct=0;
+                         escalate if even that doesn't clear the gate
+Any other block (G1, G2, G4, G7, G8, G9, G10) just reports "blocked" — the
+caller (app/detection/batch_scanner.py) decides whether and when to retry.
 
 THE PRE-DEBIT NOTICE (RBI compliance, gate G9)
 -----------------------------------------------
@@ -45,7 +59,7 @@ from typing import Any, Callable
 from app.audit import log as audit_log
 from app.db import repository
 from app.execution import razorpay_client
-from app.governance.policy_gate import MONEY_ACTIONS, OUTREACH_ACTIONS
+from app.governance.policy_gate import GateResult, MONEY_ACTIONS, OUTREACH_ACTIONS
 from app.governance.policy_gate import check as gate_check
 
 _ACTOR = "execution.actions"
@@ -106,6 +120,11 @@ def _purpose_for(case: dict) -> str:
     return "subscription renewal" if case.get("source") == "subscription" else "checkout completion"
 
 
+_NO_DISCOUNT_FALLBACK_MESSAGE = (
+    "Namaste {name}, yeh raha Rs {amount} ka aapka payment link, ek click mein pay kar dein."
+)
+
+
 # ---------------------------------------------------------------------------
 # public entry point
 # ---------------------------------------------------------------------------
@@ -148,7 +167,97 @@ def execute(decision: dict, case: dict, policy: dict, *, live: bool = False, now
     audit_log.gate(case_id, gate, action)
     # step 5
     if not gate.allowed:
+        if gate.gate == "G6":
+            retried = _retry_without_discount(action, case, decision, policy, context, now, live)
+            if retried is not None:
+                return retried
+            result = _apply_terminal(
+                case_id, "ESCALATED", audit_log.ESCALATED,
+                {
+                    "intervention": "escalate",
+                    "reasoning": f"Discount still blocked even with it stripped to 0: {gate.reason}",
+                },
+            )
+            result["gate"] = "G6"
+            return result
+        terminal = _translate_gate_block(gate, case_id)
+        if terminal is not None:
+            return terminal
         return {"executed": False, "gate": gate.gate, "reason": gate.reason}
+
+    # step 6-9
+    return _execute_allowed(action, case, decision, policy, live=live, now=now)
+
+
+def _translate_gate_block(gate: GateResult, case_id: str) -> dict | None:
+    """
+    The gate is the sole authority on the attempt cap (G3) and the grace
+    period (G5) — app/decision/engine.py proposes without checking either.
+    A block on one of those bounds IS the terminal outcome, so it's
+    translated directly instead of leaving the case dangling in limbo.
+    Returns None for every other gate: the caller just reports the block.
+
+    The returned result still carries "gate": gate.gate (overriding
+    _apply_terminal's default None) — a caller counting gate_block_counts
+    must see G3/G5 fired here, not just "executed: True". Losing that would
+    make the gate's own enforcement invisible again, the exact problem this
+    whole restructure exists to fix.
+    """
+    if gate.gate == "G3":
+        result = _apply_terminal(
+            case_id, "ESCALATED", audit_log.ESCALATED,
+            {"intervention": "escalate", "reasoning": gate.reason},
+        )
+        result["gate"] = gate.gate
+        return result
+    if gate.gate == "G5":
+        result = _apply_terminal(
+            case_id, "CLOSED_LOST", audit_log.CLOSED_LOST,
+            {"intervention": "close_lost", "reasoning": gate.reason},
+        )
+        result["gate"] = gate.gate
+        return result
+    return None
+
+
+def _retry_without_discount(
+    action: dict, case: dict, decision: dict, policy: dict, context: dict, now: datetime, live: bool,
+) -> dict | None:
+    """
+    G6 block: the proposed discount alone exceeded policy's cap (e.g. a
+    merchant override tighter than the engine's default offer). Re-propose
+    the exact same action with the discount stripped to 0 rather than giving
+    up outright — a plain link is still worth sending. Returns None if the
+    zero-discount version doesn't clear the gate either, so the caller
+    escalates instead.
+    """
+    case_id = case["id"]
+    stripped_action = {**action, "discount_pct": 0.0}
+    gate = gate_check(stripped_action, case, policy, now=now, **context)
+    audit_log.gate(case_id, gate, stripped_action)
+    if not gate.allowed:
+        return None
+
+    stripped_decision = {
+        **decision,
+        "discount_pct": 0.0,
+        "message": _NO_DISCOUNT_FALLBACK_MESSAGE.format(
+            name=case.get("customer_ref") or "Dost", amount=_fmt_amount(case.get("amount")),
+        ),
+    }
+    return _execute_allowed(stripped_action, case, stripped_decision, policy, live=live, now=now)
+
+
+def _execute_allowed(action: dict, case: dict, decision: dict, policy: dict, *, live: bool, now: datetime) -> dict:
+    """
+    Money and/or outreach side of an ALLOWED action: persist, execute, count
+    the attempt, advance state. Shared by the normal path and the
+    G6-retry-without-discount path — both have already cleared the gate by
+    the time this runs.
+    """
+    case_id = case["id"]
+    action_type = action["type"]
+    intervention = action["intervention"]
 
     # step 6
     money_result = None
@@ -240,6 +349,11 @@ def _send_pre_debit_notice(case: dict, decision: dict, policy: dict, context: di
     gate = gate_check(action, case, policy, now=now, **context)
     audit_log.gate(case_id, gate, action)
     if not gate.allowed:
+        # G3 can't apply to a plain outreach action, but G5 (grace period)
+        # can — an aged-out case shouldn't even get its notice sent.
+        terminal = _translate_gate_block(gate, case_id)
+        if terminal is not None:
+            return terminal
         return {"executed": False, "gate": gate.gate, "reason": gate.reason}
 
     message = _pre_debit_notice_message(case, decision, policy, now)

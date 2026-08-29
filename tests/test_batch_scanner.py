@@ -358,29 +358,81 @@ def test_unclear_reply_has_no_override():
 # naive baseline
 # ---------------------------------------------------------------------------
 
-def test_naive_recovers_only_technical_other_when_recoverable():
-    recoverable = {"recoverable": True}
+def test_naive_not_recoverable_never_recovers_regardless_of_reason():
     unrecoverable = {"recoverable": False}
-    assert bs._naive_recovers({"reason_category": "technical_other", "latent": recoverable}) is True
-    assert bs._naive_recovers({"reason_category": "technical_other", "latent": unrecoverable}) is False
-    for reason in ("insufficient_funds", "bank_downtime", "mandate_revoked", "expired_card", "checkout_dropoff"):
-        assert bs._naive_recovers({"reason_category": reason, "latent": recoverable}) is False
+    for reason in (
+        "insufficient_funds", "bank_downtime", "mandate_revoked",
+        "expired_card", "checkout_dropoff", "technical_other",
+    ):
+        assert bs._naive_recovers({"id": "x", "reason_category": reason, "latent": unrecoverable}) is False
+
+
+def test_naive_technical_other_recovers_whenever_recoverable():
+    assert bs._naive_recovers({"id": "x", "reason_category": "technical_other", "latent": {"recoverable": True}}) is True
+
+
+def test_naive_mandate_revoked_and_expired_card_never_recover_even_if_recoverable():
+    """Retrying the exact same broken payment method changes nothing, no
+    matter when — these two can never succeed on a blind immediate retry."""
+    recoverable = {"recoverable": True}
+    assert bs._naive_recovers({"id": "x", "reason_category": "mandate_revoked", "latent": recoverable}) is False
+    assert bs._naive_recovers({"id": "x", "reason_category": "expired_card", "latent": recoverable}) is False
+
+
+def test_naive_checkout_dropoff_never_recovers_even_if_recoverable():
+    assert bs._naive_recovers({"id": "x", "reason_category": "checkout_dropoff", "latent": {"recoverable": True}}) is False
+
+
+def test_naive_bank_downtime_recovers_only_when_outage_already_cleared():
+    recovers = {"recoverable": True, "resolves_after_days": 0}
+    still_down = {"recoverable": True, "resolves_after_days": 1}
+    assert bs._naive_recovers({"id": "x", "reason_category": "bank_downtime", "latent": recovers}) is True
+    assert bs._naive_recovers({"id": "x", "reason_category": "bank_downtime", "latent": still_down}) is False
+
+
+def test_naive_insufficient_funds_is_deterministic_per_case_id():
+    """The topup chance is randomised, but seeded by case id — the same case
+    must give the same answer every time, run after run."""
+    case = {"id": "case_abc", "reason_category": "insufficient_funds", "latent": {"recoverable": True}}
+    first = bs._naive_recovers(case)
+    for _ in range(5):
+        assert bs._naive_recovers(case) == first
+
+
+def test_naive_insufficient_funds_topup_chance_lands_near_the_documented_rate():
+    """Not exact — it's a probability — but across many distinct case ids the
+    empirical rate should land close to _NAIVE_TOPUP_CHANCE, not near 0% or
+    100%, proving the RNG is actually wired to the constant."""
+    hits = sum(
+        bs._naive_recovers({"id": f"case_{i}", "reason_category": "insufficient_funds", "latent": {"recoverable": True}})
+        for i in range(2000)
+    )
+    rate = hits / 2000
+    assert abs(rate - bs._NAIVE_TOPUP_CHANCE) < 0.05
 
 
 def test_naive_baseline_aggregates_across_the_dataset(monkeypatch):
     dataset = [
-        {"reason_category": "technical_other", "amount": 100.0, "latent": {"recoverable": True}},
-        {"reason_category": "technical_other", "amount": 200.0, "latent": {"recoverable": False}},
-        {"reason_category": "insufficient_funds", "amount": 300.0, "latent": {"recoverable": True}},
+        {"id": "a", "reason_category": "technical_other", "amount": 100.0, "latent": {"recoverable": True}},
+        {"id": "b", "reason_category": "technical_other", "amount": 200.0, "latent": {"recoverable": False}},
+        {"id": "c", "reason_category": "bank_downtime", "amount": 300.0, "latent": {"recoverable": True, "resolves_after_days": 0}},
+        {"id": "d", "reason_category": "mandate_revoked", "amount": 400.0, "latent": {"recoverable": True}},
     ]
     monkeypatch.setattr(bs, "_load_dataset", lambda set_name: dataset)
     result = bs.naive_baseline("dev")
     assert result == {
-        "recovered_count": 1,
-        "recovered_value": 100.0,
-        "total_count": 3,
-        "at_risk_value": 600.0,
+        "recovered_count": 2,
+        "recovered_value": 400.0,
+        "total_count": 4,
+        "at_risk_value": 1000.0,
     }
+
+
+def test_naive_baseline_lands_in_the_realistic_range_on_the_real_dev_dataset():
+    """The headline credibility check: no more +980%-lift strawman."""
+    result = bs.naive_baseline("dev")
+    rate = result["recovered_count"] / result["total_count"]
+    assert 0.12 <= rate <= 0.18
 
 
 # ---------------------------------------------------------------------------
@@ -740,3 +792,86 @@ def test_persist_memory_runs_the_real_dev_dataset_in_seconds(monkeypatch):
 
     assert result["total_cases"] == 100
     assert elapsed < 10.0
+
+
+# ---------------------------------------------------------------------------
+# the gate is the sole authority on bounds — G2 (opt-out) mid-sequence
+# ---------------------------------------------------------------------------
+
+def opted_out_reply_case(**overrides) -> dict:
+    case = make_case(
+        reason_category="expired_card",
+        reason_raw="Card has expired",
+        latent={
+            "recoverable": True, "correct_strategy": "request_card_update",
+            "responds_to_outreach": True, "reply_intent": "opt_out",
+            "reply_text_hinglish": "mujhe nahi chahiye ab, band kar do",
+            "promise_offset_days": None, "keeps_promise": None,
+            "salary_day": None, "resolves_after_days": None,
+        },
+    )
+    case.update(overrides)
+    return case
+
+
+def test_opt_out_mid_sequence_gets_exactly_one_confirming_gate_pass(fake_repo, monkeypatch):
+    """Day 1 sends the first outreach and the reply sets opted_out. Day 2 is
+    the very next action attempt: it must still go through the gate (so G2
+    fires and lands in the audit trail via audit.log.gate) rather than being
+    silently swallowed by the loop filter. From day 3 on, the case is
+    skipped without touching the gate again."""
+    case = opted_out_reply_case(id="case_optout")
+    monkeypatch.setattr(bs, "_load_dataset", lambda set_name: [case])
+
+    result = bs.run_batch("dev", horizon_days=5, live=False, now=NOW, persist="supabase")
+
+    assert result["gate_block_counts"].get("G2") == 1
+    # exactly one outreach ever sent — the day-1 request_card_update. The
+    # day-2 attempt (send_link fallback) was blocked by G2 before anything
+    # could be persisted, and days 3-5 never reached the gate at all.
+    assert len(fake_repo.outreach) == 1
+    assert fake_repo.cases["case_optout"]["opted_out"] is True
+    assert fake_repo.cases["case_optout"]["state"] != "RECOVERED"
+
+
+# ---------------------------------------------------------------------------
+# the gate is the sole authority — end-to-end gate_block_counts on the real
+# dev dataset (the credibility check this whole restructure was about)
+# ---------------------------------------------------------------------------
+
+def test_gate_block_counts_show_more_than_just_g10_on_the_real_dataset(monkeypatch):
+    """Before this restructure, decision engine self-checks (attempt cap,
+    grace period) pre-empted G3/G5 entirely, and G6 was unreachable because
+    discounts were pre-clamped — only G10 (active-promise pause) ever fired.
+    Now the gate is the sole authority: G3 and/or G5 must show up on a real,
+    sufficiently long run — not just "something other than G10" (G2 alone
+    would satisfy that trivially without proving the attempt-cap/grace-period
+    bounds actually bind at the gate)."""
+    monkeypatch.setattr(repository_module, "bulk_insert", lambda *a, **k: 0)
+
+    result = bs.run_batch("dev", horizon_days=60, persist="memory")
+
+    counts = result["gate_block_counts"]
+    assert counts.get("G3", 0) + counts.get("G5", 0) > 0, f"neither G3 nor G5 fired: {counts!r}"
+
+
+def test_gate_block_counts_are_not_lost_when_a_block_translates_to_terminal(monkeypatch):
+    """Regression guard for the exact bug this restructure's own testing
+    caught: _apply_terminal defaults "gate" to None, so a translated G3/G5
+    (or G6-then-escalate) block must have its gate id restored onto the
+    result — otherwise it executes correctly but vanishes from
+    gate_block_counts, which is precisely the invisibility problem this
+    whole task exists to fix."""
+    monkeypatch.setattr(repository_module, "bulk_insert", lambda *a, **k: 0)
+
+    result = bs.run_batch("dev", horizon_days=60, persist="memory")
+
+    counts = result["gate_block_counts"]
+    escalated_or_closed = counts.get("G3", 0) + counts.get("G5", 0) + counts.get("G6", 0)
+    assert escalated_or_closed > 0
+    # a sanity cross-check: at least that many cases actually ended up
+    # ESCALATED or CLOSED_LOST, so the count isn't just tallying phantom blocks
+    terminal_non_recovered = sum(
+        1 for c in result["exception_list"] if c["state"] in ("ESCALATED", "CLOSED_LOST")
+    )
+    assert terminal_non_recovered > 0

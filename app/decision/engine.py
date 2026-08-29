@@ -9,7 +9,7 @@ Returns a Decision:
     "scheduled_for": iso8601 | None,
     "channel": "whatsapp" | "sms" | "email" | "voice",
     "message": "<Hinglish copy>",
-    "discount_pct": float,          # 0 unless an offer, always <= policy cap
+    "discount_pct": float,          # 0 unless an offer; NOT clamped here — G6 is the gate's job
     "is_mandate_debit": bool,
     "reasoning": "<why, plain language>"
   }
@@ -23,9 +23,12 @@ TIMING INTELLIGENCE (the thing that beats a naive retry):
   technical_other    -> backoff, capped attempts.
   checkout_dropoff   -> nudge first; bounded offer only on the second touch.
 
-Every field is clamped to policy before it leaves this module, and the result
-must still pass governance.policy_gate.check() before execution — this module
-proposes, it does not authorise.
+Nothing is clamped here. This module proposes the intervention a reason
+category WANTS; policy_gate.check() is the sole authority on whether it's
+actually allowed — the attempt cap (G3), the grace period (G5), and the
+discount cap (G6) are enforced there, not here. See decide()'s docstring for
+why duplicating those checks in this module would make the gate's copies
+unreachable.
 
 Never reads case["latent"] — decisions are made blind, exactly as they would
 be in production. Only app/detection/batch_scanner.py may read that field.
@@ -291,66 +294,6 @@ def _decide_checkout_dropoff(case: dict, attempt_no: int, policy: dict) -> dict:
     }
 
 
-def _decide_checkout_touches_exhausted(attempt_no: int, cap: int, policy: dict) -> dict:
-    """
-    PRD FR-B5: checkout_dropoff gets at most 2 touches, then CLOSED_LOST — not
-    an escalation. Two unconverted nudges is a normal, low-stakes outcome for
-    an abandoned cart, not something that needs a human.
-    """
-    return {
-        "intervention": "close_lost",
-        "scheduled_for": None,
-        "channel": _default_channel(policy),
-        "message": (
-            f"Internal note: closed as lost. Touch {attempt_no} exceeds the {cap}-touch cap "
-            "for checkout_dropoff."
-        ),
-        "discount_pct": 0.0,
-        "is_mandate_debit": False,
-        "reasoning": (
-            f"Touch {attempt_no} exceeds the {cap}-touch cap for checkout_dropoff. Two touches "
-            "without conversion means the nudge and the offer both missed; closing as lost "
-            "rather than escalating a low-intent abandoned cart to a human."
-        ),
-    }
-
-
-def _decide_escalate(reason: str, attempt_no: int, cap: int, policy: dict) -> dict:
-    return {
-        "intervention": "escalate",
-        "scheduled_for": None,
-        "channel": _default_channel(policy),
-        "message": (
-            f"Internal note: escalated to a human. Reason {reason}, attempt {attempt_no} "
-            f"exceeds the {cap}-attempt cap."
-        ),
-        "discount_pct": 0.0,
-        "is_mandate_debit": False,
-        "reasoning": (
-            f"Attempt {attempt_no} exceeds the {cap}-attempt cap for {reason}. Escalating to "
-            "a human instead of continuing to retry blindly."
-        ),
-    }
-
-
-def _decide_close_lost(age_days: int, grace_days: int, policy: dict) -> dict:
-    return {
-        "intervention": "close_lost",
-        "scheduled_for": None,
-        "channel": _default_channel(policy),
-        "message": (
-            f"Internal note: closed as lost. Case is {age_days} days old, past the "
-            f"{grace_days}-day grace period."
-        ),
-        "discount_pct": 0.0,
-        "is_mandate_debit": False,
-        "reasoning": (
-            f"Case is {age_days} days old, past the {grace_days}-day grace period. Closing as "
-            "lost rather than continuing to chase indefinitely."
-        ),
-    }
-
-
 def _decide_unknown_reason(reason: Any, policy: dict) -> dict:
     return {
         "intervention": "escalate",
@@ -382,7 +325,18 @@ def decide(
     use_llm: bool = False,
 ) -> dict:
     """
-    Turn a diagnosed case into a bounded, reason-appropriate intervention.
+    Turn a diagnosed case into the reason-appropriate intervention it WANTS —
+    unconditionally. This function does not check the attempt cap, the grace
+    period, or the discount cap; it proposes the timing-smart action for the
+    reason category and nothing more.
+
+    Those three bounds are governance's job, not this module's: policy_gate
+    is the SOLE authority on them (G3, G5, G6 respectively). Duplicating a
+    check here would mean the same bound is enforced twice, and since this
+    function would run first, the gate's copy would never actually see a
+    violation — dead code wearing a safety net's clothes. execute() (in
+    app/execution/actions.py) is what translates a G3/G5 block into
+    ESCALATED/CLOSED_LOST, and retries a G6 block without the discount.
 
     use_llm=False (the default): messages come entirely from templates, no
     network call is made. Batch runs should never pass use_llm=True; the live
@@ -393,23 +347,6 @@ def decide(
     case_id = case.get("id")
     reason = case.get("reason_category")
     attempt_no = _attempt_number(case, history)
-    created_at = _parse_ts(case.get("created_at"))
-
-    grace_days = int(policy.get("grace_period_days", 14))
-    if created_at is not None:
-        age_days = (now - created_at).days
-        if age_days > grace_days:
-            partial = _decide_close_lost(age_days, grace_days, policy)
-            return _finalize(case_id, reason, attempt_no, partial, policy, created_at, now, use_llm=False)
-
-    rule = policy.get("retry_rules", {}).get(reason, {})
-    cap = int(rule.get("max_attempts", policy.get("max_retries", 3)))
-    if attempt_no > cap:
-        if reason == "checkout_dropoff":
-            partial = _decide_checkout_touches_exhausted(attempt_no, cap, policy)
-        else:
-            partial = _decide_escalate(reason, attempt_no, cap, policy)
-        return _finalize(case_id, reason, attempt_no, partial, policy, created_at, now, use_llm=False)
 
     if reason == "insufficient_funds":
         partial = _decide_insufficient_funds(case, attempt_no, now, policy)
@@ -424,28 +361,18 @@ def decide(
     else:
         partial = _decide_unknown_reason(reason, policy)
 
-    return _finalize(case_id, reason, attempt_no, partial, policy, created_at, now, use_llm=use_llm)
+    return _finalize(case_id, reason, attempt_no, partial, use_llm=use_llm)
 
 
-def _finalize(
-    case_id: str | None,
-    reason: Any,
-    attempt_no: int,
-    partial: dict,
-    policy: dict,
-    created_at: datetime | None,
-    now: datetime,
-    *,
-    use_llm: bool,
-) -> dict:
-    """Clamp every bound, optionally personalise the message, log DECIDED."""
-    discount = max(0.0, min(float(partial["discount_pct"]), float(policy.get("max_discount_pct", 10.0))))
-
+def _finalize(case_id: str | None, reason: Any, attempt_no: int, partial: dict, *, use_llm: bool) -> dict:
+    """
+    No clamping here — discount_pct and scheduled_for pass through exactly as
+    the per-reason function proposed them. If a proposal is out of bounds,
+    that's the gate's call to make, not this function's to quietly fix.
+    Optionally personalises the message (never blocks on failure), and logs
+    DECIDED.
+    """
     scheduled_for = partial["scheduled_for"]
-    if scheduled_for is not None and created_at is not None:
-        grace_days = int(policy.get("grace_period_days", 14))
-        deadline = created_at + timedelta(days=grace_days)
-        scheduled_for = min(scheduled_for, deadline)
 
     message = _strip_em_dash(partial["message"])
     personalized = False
@@ -461,7 +388,7 @@ def _finalize(
         "scheduled_for": scheduled_for.isoformat() if scheduled_for is not None else None,
         "channel": partial["channel"],
         "message": message,
-        "discount_pct": discount,
+        "discount_pct": float(partial["discount_pct"]),
         "is_mandate_debit": bool(partial["is_mandate_debit"]),
         "reasoning": partial["reasoning"],
     }

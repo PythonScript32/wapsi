@@ -96,11 +96,14 @@ def test_mandate_revoked_is_never_a_mandate_debit():
     assert result["is_mandate_debit"] is False
 
 
-def test_mandate_revoked_beyond_its_one_attempt_cap_escalates_not_retries():
-    case = make_case(reason_category="mandate_revoked", attempts_made=1)
+def test_mandate_revoked_still_proposes_request_re_mandate_past_its_attempt_cap():
+    """The engine no longer checks the attempt cap — it proposes the same
+    reason-appropriate intervention regardless of attempts_made. Cap
+    enforcement is the gate's job now (G3, see test_governance.py), which
+    execution.actions.py translates into ESCALATED."""
+    case = make_case(reason_category="mandate_revoked", attempts_made=1)  # cap is 1
     result = decide(case, [], DEFAULT_POLICY, now=NOW)
-    assert result["intervention"] not in {"retry_now", "retry_after_date", "request_re_mandate"}
-    assert result["intervention"] == "escalate"
+    assert result["intervention"] == "request_re_mandate"
 
 
 # ---------------------------------------------------------------------------
@@ -126,16 +129,20 @@ def test_bank_downtime_matches_configured_backoff_schedule():
 
 
 # ---------------------------------------------------------------------------
-# discount_pct — always <= policy cap, regardless of what the template asked for
+# discount_pct — proposed as-is; the engine no longer clamps it
 # ---------------------------------------------------------------------------
 
-def test_discount_pct_never_exceeds_policy_cap_even_when_template_wants_more():
-    # default_offer_pct (10%) exceeds this merchant's tighter cap.
-    strict_policy = {**DEFAULT_POLICY, "max_discount_pct": 3.0}
+def test_discount_pct_is_not_clamped_by_the_engine_even_over_a_tighter_policy_cap():
+    """G6 (the gate) is now the sole authority on the discount cap —
+    execution.actions.py re-proposes without the discount (or escalates) on
+    a G6 block. The engine itself must NOT quietly fix an over-cap proposal;
+    doing so would make the gate's own G6 check unreachable, same as the
+    attempt-cap and grace-period bounds."""
+    strict_policy = {**DEFAULT_POLICY, "max_discount_pct": 3.0}  # tighter than default_offer_pct (10%)
     case = make_case(reason_category="checkout_dropoff", source="checkout", attempts_made=1)
     result = decide(case, [], strict_policy, now=NOW)
     assert result["intervention"] == "send_link_with_offer"
-    assert result["discount_pct"] <= 3.0
+    assert result["discount_pct"] == 10.0  # unclamped — policy["default_offer_pct"], not the 3% cap
 
 
 def test_discount_pct_is_never_negative():
@@ -172,12 +179,14 @@ def test_checkout_dropoff_never_offers_to_an_already_paid_customer():
     assert result["intervention"] == "send_link"
 
 
-def test_checkout_dropoff_max_two_touches_then_closed_lost_not_escalated():
-    """FR-B5: max 2 touches, then CLOSED_LOST — not an escalation, unlike
-    every other reason category."""
-    case = make_case(reason_category="checkout_dropoff", source="checkout", attempts_made=2)
+def test_checkout_dropoff_still_proposes_the_offer_past_its_touch_cap():
+    """FR-B5's "max 2 touches, then CLOSED_LOST" is now enforced by the gate
+    (G3) and translated by execution.actions.py — the engine itself just
+    keeps proposing touch 2's offer regardless of how many touches have
+    already happened; it doesn't self-limit."""
+    case = make_case(reason_category="checkout_dropoff", source="checkout", attempts_made=2)  # cap is 2
     result = decide(case, [], DEFAULT_POLICY, now=NOW)
-    assert result["intervention"] == "close_lost"
+    assert result["intervention"] == "send_link_with_offer"
 
 
 # ---------------------------------------------------------------------------
@@ -196,28 +205,34 @@ def test_expired_card_second_attempt_falls_back_to_link():
 
 
 # ---------------------------------------------------------------------------
-# attempt caps and grace period — defense in depth ahead of the governance gate
+# attempt caps and grace period — the engine no longer checks either; the
+# gate (G3, G5) is the sole authority. See test_governance.py for gate-level
+# coverage and test_actions.py for how execution.actions.py translates a
+# block into ESCALATED / CLOSED_LOST.
 # ---------------------------------------------------------------------------
 
-def test_attempt_cap_exceeded_escalates():
+def test_attempt_cap_is_not_checked_by_the_engine():
     case = make_case(reason_category="bank_downtime", attempts_made=3)  # cap is 3
     result = decide(case, [], DEFAULT_POLICY, now=NOW)
-    assert result["intervention"] == "escalate"
+    assert result["intervention"] == "retry_after_date"
 
 
-def test_past_grace_period_closes_lost():
+def test_grace_period_is_not_checked_by_the_engine():
     case = make_case(created_at=(NOW - timedelta(days=20)).isoformat())  # cap is 14 days
     result = decide(case, [], DEFAULT_POLICY, now=NOW)
-    assert result["intervention"] == "close_lost"
+    assert result["intervention"] == "retry_after_date"
 
 
-def test_scheduled_for_is_clamped_to_grace_period():
+def test_scheduled_for_is_not_clamped_to_grace_period():
     """A case created 13 days ago with a 14-day grace period leaves only 1 day
-    of runway — a salary-day retry weeks out must be pulled back inside it."""
+    of runway, but the engine proposes the honest salary-day guess anyway —
+    however far out it lands. It's the gate's job (G5) to block the eventual
+    attempt once the case is actually past grace, not the engine's job to
+    quietly pull the schedule back inside a window it isn't checking."""
     case = make_case(created_at=(NOW - timedelta(days=13)).isoformat())
     result = decide(case, [], DEFAULT_POLICY, now=NOW)
     deadline = NOW - timedelta(days=13) + timedelta(days=DEFAULT_POLICY["grace_period_days"])
-    assert scheduled_dt(result) <= deadline
+    assert scheduled_dt(result) > deadline
 
 
 def test_unknown_reason_fails_safe_to_escalate():
