@@ -24,6 +24,8 @@ SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")  # backend ONLY
 
 # --- LLM / voice ------------------------------------------------------------
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")            # runtime brain (free tier)
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")                # optional, faster free tier; preferred over Gemini when set
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")    # outbound voice (stretch)
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "")
 

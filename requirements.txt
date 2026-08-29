@@ -7,5 +7,6 @@ pydantic
 python-dotenv
 razorpay
 google-generativeai
+google-genai
 elevenlabs
 pytest
