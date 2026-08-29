@@ -69,6 +69,15 @@ def diagnose(err: Exception) -> str:
             "     -> Free daily quota resets at 00:00 Pacific. Or switch to a\n"
             "        Flash / Flash-Lite model, which have the largest free quotas."
         )
+    if "finish_reason=2" in low or "max_tokens" in low:
+        return (
+            "The model hit its output budget before answering.\n"
+            "     Gemini 3.x emits internal reasoning tokens first, so a small\n"
+            "     max_output_tokens gets consumed by thinking and no text is returned.\n"
+            "     -> Raise max_output_tokens (512+), or disable thinking."
+        )
+    if "no candidates" in low:
+        return "The request was blocked before generation. Usually a safety filter."
     if "404" in msg or "not found" in low:
         return (
             "That model ID doesn't exist for this key.\n"
@@ -117,6 +126,42 @@ def _suggested_model(err: Exception) -> str | None:
     return m.group(1) if m else None
 
 
+FINISH_REASONS = {
+    1: "STOP (normal completion)",
+    2: "MAX_TOKENS — the model ran out of output budget. On Gemini 3.x this is "
+       "usually thinking tokens eating the whole allowance. Raise max_output_tokens.",
+    3: "SAFETY — blocked by a safety filter",
+    4: "RECITATION — blocked as likely reproduction of training data",
+    5: "OTHER",
+}
+
+
+def _extract_text(resp: Any) -> str:
+    """
+    Pull text out of a response safely.
+
+    resp.text is a convenience accessor that RAISES when the model returned no
+    text part — which happens on MAX_TOKENS, safety blocks, and recitation
+    blocks. Read the candidate directly so we can report WHY instead of
+    surfacing an opaque accessor error.
+    """
+    candidates = getattr(resp, "candidates", None) or []
+    if not candidates:
+        raise RuntimeError("Model returned no candidates at all.")
+
+    cand = candidates[0]
+    parts = getattr(getattr(cand, "content", None), "parts", None) or []
+    text = "".join(getattr(p, "text", "") for p in parts).strip()
+
+    if text:
+        return text
+
+    fr = getattr(cand, "finish_reason", None)
+    fr_int = int(fr) if fr is not None else None
+    explain = FINISH_REASONS.get(fr_int, f"unknown finish_reason={fr}")
+    raise RuntimeError(f"Model returned no text. finish_reason={fr_int}: {explain}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Check whether a Gemini API key works.")
     ap.add_argument("--key", help="API key to test (otherwise reads GEMINI_API_KEY from .env)")
@@ -161,25 +206,30 @@ def main() -> int:
     print(f"\n{INFO} Testing generation with: {target}")
 
     # ---- 3: TEXT -------------------------------------------------------------
-    def _try(model_id: str):
+    # NOTE: Gemini 3.x models emit internal reasoning tokens BEFORE the answer.
+    # A tight max_output_tokens gets consumed by that thinking and you get a
+    # response with no text part at all (finish_reason=2, MAX_TOKENS).
+    # Always leave generous headroom.
+    def _try(model_id: str) -> str:
         model = genai.GenerativeModel(model_id)
-        return model.generate_content(
+        resp = model.generate_content(
             "Reply with exactly one word: WORKING",
-            generation_config={"max_output_tokens": 10, "temperature": 0},
+            generation_config={"max_output_tokens": 512, "temperature": 0},
         )
+        return _extract_text(resp)
 
     try:
-        resp = _try(target)
-        print(f"{OK} Text generation works ({target}). Replied: {resp.text.strip()!r}")
+        text = _try(target)
+        print(f"{OK} Text generation works ({target}). Replied: {text!r}")
     except Exception as e:
         # A retired model returns 404 and names its replacement. Retry once.
         alt = _suggested_model(e)
         if alt and alt != target:
             print(f"{WARN} {target} is retired. Google suggests {alt} — retrying...")
             try:
-                resp = _try(alt)
+                text = _try(alt)
                 target = alt
-                print(f"{OK} Text generation works ({target}). Replied: {resp.text.strip()!r}")
+                print(f"{OK} Text generation works ({target}). Replied: {text!r}")
             except Exception as e2:
                 print(f"{BAD} Generation failed.\n     {diagnose(e2)}\n\n     Raw: {e2}")
                 return 1
