@@ -39,6 +39,8 @@ DEFAULT_POLICY = {
     "grace_period_days": 14,             # after this, close as CLOSED_LOST
     "rbi_pre_debit_notice_hours": 24,    # notify before any mandate debit
     "max_promise_horizon_days": 14,      # cap how far out a promise may be
+    "backoff_hours": [4, 12, 24],        # exponential backoff schedule, by attempt number
+    "default_offer_pct": 10.0,           # checkout touch-2 offer, before the max_discount_pct clamp
 
     # per-reason strategy + attempt caps
     "retry_rules": {

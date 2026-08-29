@@ -4,11 +4,10 @@ Diagnosis must map raw gateway strings to the right category, deterministically.
 Rules run first and are ground truth. The LLM is only a fallback for reasons no
 rule recognises, its answer is constrained to the enum, and it can never
 override an unambiguous rule match. No test here touches the network — the LLM
-call is mocked at its single seam, classifier._call_llm.
+call is mocked at its single seam, app.llm.client.call (see app/llm/client.py
+and tests/test_llm_client.py for the client itself).
 """
 from __future__ import annotations
-
-from types import SimpleNamespace
 
 import pytest
 
@@ -59,14 +58,14 @@ def test_rules_are_case_insensitive():
 # ---------------------------------------------------------------------------
 
 def test_unknown_reason_routes_to_llm(monkeypatch):
-    monkeypatch.setattr(classifier, "_call_llm", lambda reason_raw: "mandate_revoked")
+    monkeypatch.setattr(classifier.llm_client, "call", lambda prompt: "mandate_revoked")
     category, how = classifier.classify(make_case("some brand new gateway message we've never seen"))
     assert category == "mandate_revoked"
     assert how == "llm"
 
 
 def test_llm_reply_is_stripped_and_lowercased(monkeypatch):
-    monkeypatch.setattr(classifier, "_call_llm", lambda reason_raw: "  Bank_Downtime\n")
+    monkeypatch.setattr(classifier.llm_client, "call", lambda prompt: "  Bank_Downtime\n")
     category, how = classifier.classify(make_case("a totally novel failure string"))
     assert category == "bank_downtime"
     assert how == "llm"
@@ -74,89 +73,52 @@ def test_llm_reply_is_stripped_and_lowercased(monkeypatch):
 
 @pytest.mark.parametrize("garbage", ["", "not_a_real_category", "sorry, I cannot classify this", "insufficient_funds and also expired_card"])
 def test_llm_garbage_falls_back_to_technical_other(monkeypatch, garbage):
-    monkeypatch.setattr(classifier, "_call_llm", lambda reason_raw: garbage)
+    monkeypatch.setattr(classifier.llm_client, "call", lambda prompt: garbage)
     category, how = classifier.classify(make_case("a totally novel failure string"))
     assert category == "technical_other"
     assert how == "llm_failed"
 
 
 def test_llm_call_raising_falls_back_to_technical_other(monkeypatch):
-    def boom(reason_raw):
+    def boom(prompt):
         raise RuntimeError("network is down")
 
-    monkeypatch.setattr(classifier, "_call_llm", boom)
+    monkeypatch.setattr(classifier.llm_client, "call", boom)
     category, how = classifier.classify(make_case("a totally novel failure string"))
     assert category == "technical_other"
     assert how == "llm_failed"
 
 
-def test_rule_match_never_calls_the_llm(monkeypatch):
-    def fail_if_called(reason_raw):
-        raise AssertionError("LLM must not be called when a rule matches")
+def test_llm_failure_logs_degraded_mode(monkeypatch):
+    """Any LLM failure — network, provider, extraction, whatever's behind the
+    seam — must be logged as degraded mode, with the underlying reason kept
+    in the audit trail for a human to diagnose later."""
+    def boom(prompt):
+        raise RuntimeError("Gemini returned no text; finish_reason=SAFETY.")
 
-    monkeypatch.setattr(classifier, "_call_llm", fail_if_called)
-    category, how = classifier.classify(make_case("Card has expired"))
-    assert category == "expired_card"
-    assert how == "rule"
-
-
-# ---------------------------------------------------------------------------
-# Gemini text extraction — reads candidates[0].content.parts, not resp.text,
-# and reports finish_reason when there is nothing to extract. No SDK objects
-# involved: SimpleNamespace duck-types the parts of the response we touch.
-# ---------------------------------------------------------------------------
-
-def _fake_response(parts_text=("mandate_revoked",), finish_reason=None, candidates=True):
-    if not candidates:
-        return SimpleNamespace(candidates=[])
-    parts = [SimpleNamespace(text=t) for t in parts_text]
-    return SimpleNamespace(candidates=[
-        SimpleNamespace(content=SimpleNamespace(parts=parts), finish_reason=finish_reason)
-    ])
-
-
-def test_extract_gemini_text_joins_parts():
-    resp = _fake_response(parts_text=["mandate", "_revoked"])
-    assert classifier._extract_gemini_text(resp) == "mandate_revoked"
-
-
-def test_extract_gemini_text_raises_with_finish_reason_when_no_text():
-    resp = _fake_response(parts_text=[], finish_reason="MAX_TOKENS")
-    with pytest.raises(RuntimeError, match="MAX_TOKENS"):
-        classifier._extract_gemini_text(resp)
-
-
-def test_extract_gemini_text_raises_when_no_candidates():
-    resp = _fake_response(candidates=False)
-    with pytest.raises(RuntimeError, match="no candidates"):
-        classifier._extract_gemini_text(resp)
-
-
-def test_gemini_extraction_failure_falls_back_to_technical_other_and_logs_degraded_mode(monkeypatch):
-    """The Gemini path (mocked at _call_gemini, not _call_llm) must, on any
-    extraction failure, fall back to technical_other and record the degraded
-    mode via audit_log.error — never crash the classifier."""
-    monkeypatch.setattr(classifier.config, "GROQ_API_KEY", "")
+    monkeypatch.setattr(classifier.llm_client, "call", boom)
 
     logged = {}
-
-    def fake_error(case_id, actor, what, exc):
-        logged["what"] = what
-        logged["exc"] = exc
-
-    monkeypatch.setattr(classifier.audit_log, "error", fake_error)
-
-    def boom(reason_raw):
-        resp = _fake_response(parts_text=[], finish_reason="SAFETY")
-        return classifier._extract_gemini_text(resp)
-
-    monkeypatch.setattr(classifier, "_call_gemini", boom)
+    monkeypatch.setattr(
+        classifier.audit_log, "error",
+        lambda case_id, actor, what, exc: logged.update(what=what, exc=exc),
+    )
 
     category, how = classifier.classify(make_case("a totally novel failure string"))
     assert category == "technical_other"
     assert how == "llm_failed"
     assert "degraded mode" in logged["what"]
     assert "SAFETY" in str(logged["exc"])
+
+
+def test_rule_match_never_calls_the_llm(monkeypatch):
+    def fail_if_called(prompt):
+        raise AssertionError("LLM must not be called when a rule matches")
+
+    monkeypatch.setattr(classifier.llm_client, "call", fail_if_called)
+    category, how = classifier.classify(make_case("Card has expired"))
+    assert category == "expired_card"
+    assert how == "rule"
 
 
 # ---------------------------------------------------------------------------
@@ -166,10 +128,10 @@ def test_gemini_extraction_failure_falls_back_to_technical_other_and_logs_degrad
 def test_checkout_source_routes_to_checkout_dropoff_regardless_of_reason(monkeypatch):
     """A real abandoned checkout carries no gateway failure reason at all —
     source is ground truth, not the (synthetic-data-only) reason string."""
-    def fail_if_called(reason_raw):
+    def fail_if_called(prompt):
         raise AssertionError("LLM must not be called when source is checkout")
 
-    monkeypatch.setattr(classifier, "_call_llm", fail_if_called)
+    monkeypatch.setattr(classifier.llm_client, "call", fail_if_called)
     category, how = classifier.classify(
         make_case("this reason string is nonsense and matches no rule", source="checkout")
     )
@@ -209,5 +171,3 @@ def test_rule_path_logs_diagnosed(monkeypatch):
     assert kwargs["decision"] == "expired_card"
     assert kwargs["inp"]["reason_raw"] == "Card has expired"
     assert kwargs["reasoning"]
-
-
