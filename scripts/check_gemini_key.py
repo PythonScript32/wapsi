@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 
 try:
@@ -81,10 +82,46 @@ def diagnose(err: Exception) -> str:
     return "Unrecognised error. Full text below."
 
 
+def _pick_model(candidates: list[str]) -> str:
+    """
+    Choose a model that is actually alive.
+
+    Models get retired for new users, so listing a model does NOT guarantee you
+    may call it. Preference order:
+      1. a "-latest" alias  — never goes stale, Google repoints it
+      2. the highest version number, excluding previews
+      3. the highest version number including previews
+      4. whatever is first
+    """
+    if not candidates:
+        return ""
+
+    latest = [m for m in candidates if m.endswith("-latest")]
+    if latest:
+        # prefer plain flash-latest over flash-lite-latest
+        plain = [m for m in latest if "lite" not in m]
+        return (plain or latest)[0]
+
+    def version_of(name: str) -> float:
+        nums = re.findall(r"(\d+\.?\d*)", name)
+        return float(nums[0]) if nums else 0.0
+
+    stable = [m for m in candidates if "preview" not in m and "exp" not in m]
+    pool = stable or candidates
+    return max(pool, key=version_of)
+
+
+def _suggested_model(err: Exception) -> str | None:
+    """Google's 404 usually names the replacement. Extract it and retry."""
+    m = re.search(r"use\s+models/([\w.\-]+)", str(err))
+    return m.group(1) if m else None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Check whether a Gemini API key works.")
     ap.add_argument("--key", help="API key to test (otherwise reads GEMINI_API_KEY from .env)")
     ap.add_argument("--audio", help="optional audio file to test Hinglish transcription")
+    ap.add_argument("--model", help="force a specific model id")
     args = ap.parse_args()
 
     key = args.key or os.getenv("GEMINI_API_KEY", "")
@@ -120,21 +157,35 @@ def main() -> int:
     for m in (flash or usable)[:8]:
         print(f"       - {m}")
 
-    # Free tier covers Flash / Flash-Lite. Prefer those.
-    target = flash[0] if flash else usable[0]
+    target = args.model or _pick_model(flash or usable)
     print(f"\n{INFO} Testing generation with: {target}")
 
     # ---- 3: TEXT -------------------------------------------------------------
-    try:
-        model = genai.GenerativeModel(target)
-        resp = model.generate_content(
+    def _try(model_id: str):
+        model = genai.GenerativeModel(model_id)
+        return model.generate_content(
             "Reply with exactly one word: WORKING",
             generation_config={"max_output_tokens": 10, "temperature": 0},
         )
-        print(f"{OK} Text generation works. Model replied: {resp.text.strip()!r}")
+
+    try:
+        resp = _try(target)
+        print(f"{OK} Text generation works ({target}). Replied: {resp.text.strip()!r}")
     except Exception as e:
-        print(f"{BAD} Generation failed.\n     {diagnose(e)}\n\n     Raw: {e}")
-        return 1
+        # A retired model returns 404 and names its replacement. Retry once.
+        alt = _suggested_model(e)
+        if alt and alt != target:
+            print(f"{WARN} {target} is retired. Google suggests {alt} — retrying...")
+            try:
+                resp = _try(alt)
+                target = alt
+                print(f"{OK} Text generation works ({target}). Replied: {resp.text.strip()!r}")
+            except Exception as e2:
+                print(f"{BAD} Generation failed.\n     {diagnose(e2)}\n\n     Raw: {e2}")
+                return 1
+        else:
+            print(f"{BAD} Generation failed.\n     {diagnose(e)}\n\n     Raw: {e}")
+            return 1
 
     # ---- 4: AUDIO (optional) -------------------------------------------------
     if args.audio:
