@@ -41,6 +41,7 @@ DEFAULT_POLICY = {
     "max_promise_horizon_days": 14,      # cap how far out a promise may be
     "backoff_hours": [4, 12, 24],        # exponential backoff schedule, by attempt number
     "default_offer_pct": 10.0,           # checkout touch-2 offer, before the max_discount_pct clamp
+    "action_retry_delays_s": [1, 4, 10], # live Razorpay call backoff before escalating
 
     # per-reason strategy + attempt caps
     "retry_rules": {
