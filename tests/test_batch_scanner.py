@@ -1,0 +1,742 @@
+"""
+Tests for the batch runner. No real DB, no real Razorpay, no real clock: a
+FakeRepository stands in for app.db.repository (shared by batch_scanner AND
+the actions/classifier/decision modules it drives, since they all import the
+same module object), live is always False so actions.py only simulates, and
+the simulated clock is seeded via run_batch(..., now=...) for determinism.
+
+Every run_batch() call here passes persist="supabase" — that tells
+run_batch() NOT to perform its own persist="memory" swap, so it runs against
+whatever repository.* functions are already in effect, which is exactly this
+file's own pre-patched FakeRepository. persist="memory" (the default) and
+app/db/memory_repository.py's own correctness are covered separately in
+tests/test_memory_repository.py.
+
+Most of the tricky logic (salary-day grading, reply routing, naive baseline)
+is tested as pure functions first; a handful of run_batch() tests then check
+the day-by-day wiring end to end.
+"""
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+import app.audit.log as audit_log_module
+import app.db.repository as repository_module
+from app.config import DEFAULT_POLICY
+from app.detection import batch_scanner as bs
+
+NOW = datetime(2026, 9, 10, 9, 0, tzinfo=timezone.utc)  # mid-month, month has 20 days left
+
+# Captured before the autouse no_audit_writes fixture ever runs, so a test
+# that needs REAL audit rows (e.g. to prove they flush correctly) can
+# restore them for just that test via monkeypatch.
+_REAL_AUDIT_RECORD = audit_log_module.record
+_REAL_AUDIT_GATE = audit_log_module.gate
+_REAL_AUDIT_ERROR = audit_log_module.error
+_REAL_AUDIT_MONEY_ACTION = audit_log_module.money_action
+
+
+# ---------------------------------------------------------------------------
+# fakes
+# ---------------------------------------------------------------------------
+
+class FakeRepository:
+    def __init__(self):
+        self.cases: dict[str, dict] = {}
+        self.attempts_by_key: dict[str, dict] = {}
+        self.outreach: list[dict] = []
+        self.promises: dict[str, dict] = {}
+        self._next_promise_id = 1
+        self.case_updates: list[dict] = []
+        self.recovered: list[tuple] = []
+        self.last_contact_at: dict[str, str] = {}
+        self.has_active_promise: dict[str, bool] = {}
+        self.pre_debit_notice_at: dict[str, str] = {}
+
+    def clear_batch(self, batch_id):
+        self.cases = {cid: c for cid, c in self.cases.items() if c.get("batch_id") != batch_id}
+
+    def insert_case(self, case):
+        self.cases[case["id"]] = dict(case)
+        return self.cases[case["id"]]
+
+    def gate_context(self, case_id):
+        return {
+            "last_contact_at": self.last_contact_at.get(case_id),
+            "has_active_promise": self.has_active_promise.get(case_id, False),
+            "pre_debit_notice_at": self.pre_debit_notice_at.get(case_id),
+        }
+
+    def insert_attempt(self, attempt):
+        key = attempt["idempotency_key"]
+        if key in self.attempts_by_key:
+            return self.attempts_by_key[key]
+        row = {**attempt, "id": f"attempt_{len(self.attempts_by_key) + 1}"}
+        self.attempts_by_key[key] = row
+        return row
+
+    def get_attempt_by_key(self, key):
+        return self.attempts_by_key.get(key)
+
+    def update_attempt(self, attempt_id, **fields):
+        for row in self.attempts_by_key.values():
+            if row["id"] == attempt_id:
+                row.update(fields)
+
+    def insert_outreach(self, row):
+        stored = {**row, "id": f"outreach_{len(self.outreach) + 1}"}
+        self.outreach.append(stored)
+        case_id = stored["case_id"]
+        if stored.get("channel") == "pre_debit_notice":
+            self.pre_debit_notice_at[case_id] = stored["sent_at"]
+        self.last_contact_at[case_id] = stored["sent_at"]
+        return stored
+
+    def increment_attempts(self, case_id):
+        case = self.cases.setdefault(case_id, {})
+        case["attempts_made"] = int(case.get("attempts_made") or 0) + 1
+        return case["attempts_made"]
+
+    def update_case(self, case_id, **fields):
+        self.case_updates.append({"case_id": case_id, **fields})
+        case = self.cases.setdefault(case_id, {"id": case_id})
+        case.update(fields)
+        return case
+
+    def mark_recovered(self, case_id, amount):
+        self.recovered.append((case_id, amount))
+        return self.update_case(case_id, state="RECOVERED", recovered_amount=amount)
+
+    def insert_promise(self, row):
+        pid = f"promise_{self._next_promise_id}"
+        self._next_promise_id += 1
+        stored = {**row, "id": pid}
+        self.promises[pid] = stored
+        self.has_active_promise[row["case_id"]] = True
+        return stored
+
+    def due_promises(self, on_date):
+        return [p for p in self.promises.values() if p["status"] == "pending" and p["promised_date"] <= on_date]
+
+    def resolve_promise(self, promise_id, status):
+        p = self.promises.get(promise_id)
+        if p is None:
+            return
+        p["status"] = status
+        self.has_active_promise[p["case_id"]] = False
+
+
+@pytest.fixture
+def fake_repo(monkeypatch):
+    repo = FakeRepository()
+    for name in (
+        "clear_batch", "insert_case", "gate_context", "insert_attempt", "get_attempt_by_key",
+        "update_attempt", "insert_outreach", "increment_attempts", "update_case", "mark_recovered",
+        "insert_promise", "due_promises", "resolve_promise",
+    ):
+        monkeypatch.setattr(repository_module, name, getattr(repo, name))
+    return repo
+
+
+@pytest.fixture(autouse=True)
+def no_audit_writes(monkeypatch):
+    monkeypatch.setattr(audit_log_module, "record", lambda *a, **k: None)
+    monkeypatch.setattr(audit_log_module, "gate", lambda *a, **k: None)
+    monkeypatch.setattr(audit_log_module, "error", lambda *a, **k: None)
+    monkeypatch.setattr(audit_log_module, "money_action", lambda *a, **k: None)
+
+
+@pytest.fixture(autouse=True)
+def no_snapshot_file(monkeypatch):
+    """run_batch() writes data/results_{set}.json — keep tests from touching
+    the real filesystem / polluting the repo's data/ directory."""
+    written = {}
+    monkeypatch.setattr(bs.metrics, "export_snapshot", lambda data, path: written.update(path=path, data=data))
+    return written
+
+
+def make_case(**overrides) -> dict:
+    case = {
+        "id": "case_test000001",
+        "batch_id": "dev",
+        "source": "subscription",
+        "customer_ref": "Priya Sharma",
+        "customer_phone": "98765**43",
+        "amount": 499.0,
+        "currency": "INR",
+        "reason_raw": "Payment failed due to insufficient funds in the customer account",
+        "reason_category": "insufficient_funds",
+        "created_at": NOW.isoformat(),
+        "latent": {
+            "recoverable": True,
+            "correct_strategy": "after_salary_day",
+            "responds_to_outreach": False,
+            "reply_intent": "none",
+            "reply_text_hinglish": None,
+            "promise_offset_days": None,
+            "keeps_promise": None,
+            "salary_day": None,
+            "resolves_after_days": None,
+        },
+    }
+    case.update(overrides)
+    return case
+
+
+def make_decision(**overrides) -> dict:
+    decision = {
+        "intervention": "send_link",
+        "scheduled_for": None,
+        "channel": "whatsapp",
+        "message": "Yeh raha payment link.",
+        "discount_pct": 0.0,
+        "is_mandate_debit": False,
+        "reasoning": "test",
+    }
+    decision.update(overrides)
+    return decision
+
+
+# ---------------------------------------------------------------------------
+# _true_next_salary_date
+# ---------------------------------------------------------------------------
+
+def test_true_next_salary_date_within_same_month():
+    # Sep 10, salary_day 30 -> Sep 30 (still ahead this month)
+    assert bs._true_next_salary_date(NOW, 30).date() == datetime(2026, 9, 30).date()
+
+
+def test_true_next_salary_date_rolls_to_next_month_when_already_passed():
+    # Sep 10, salary_day 1 -> already happened this month -> Oct 1
+    assert bs._true_next_salary_date(NOW, 1).date() == datetime(2026, 10, 1).date()
+
+
+def test_true_next_salary_date_clamps_to_days_in_month():
+    # Feb has 28 days in 2026 (not a leap year); salary_day 31 clamps to Feb 28
+    from_dt = datetime(2026, 2, 5, tzinfo=timezone.utc)
+    assert bs._true_next_salary_date(from_dt, 31).date() == datetime(2026, 2, 28).date()
+
+
+# ---------------------------------------------------------------------------
+# _matches_correct_strategy
+# ---------------------------------------------------------------------------
+
+def test_not_recoverable_never_matches():
+    case = make_case(latent={**make_case()["latent"], "recoverable": False})
+    decision = make_decision(intervention="retry_after_date", scheduled_for=NOW.isoformat())
+    assert bs._matches_correct_strategy(case, decision, case["latent"], NOW) is False
+
+
+def test_escalate_and_close_lost_never_match():
+    case = make_case()
+    for intervention in ("escalate", "close_lost"):
+        decision = make_decision(intervention=intervention)
+        assert bs._matches_correct_strategy(case, decision, case["latent"], NOW) is False
+
+
+def test_insufficient_funds_fails_when_guess_undershoots_real_salary_day():
+    # salary_day=1: true next salary is Oct 1. Heuristic guesses Sep 30 (month-end).
+    latent = {**make_case()["latent"], "salary_day": 1}
+    case = make_case(latent=latent, created_at=NOW.isoformat())
+    decision = make_decision(intervention="retry_after_date", scheduled_for="2026-09-30T09:00:00+00:00")
+    assert bs._matches_correct_strategy(case, decision, latent, NOW) is False
+
+
+def test_insufficient_funds_succeeds_when_guess_aligns_with_real_salary_day():
+    # salary_day=30: true next salary is Sep 30, matching the month-end guess exactly.
+    latent = {**make_case()["latent"], "salary_day": 30}
+    case = make_case(latent=latent, created_at=NOW.isoformat())
+    decision = make_decision(intervention="retry_after_date", scheduled_for="2026-09-30T09:00:00+00:00")
+    assert bs._matches_correct_strategy(case, decision, latent, NOW) is True
+
+
+def test_bank_downtime_fails_when_scheduled_too_soon():
+    latent = {
+        "recoverable": True, "correct_strategy": "backoff", "resolves_after_days": 3,
+    }
+    case = make_case(reason_category="bank_downtime", latent=latent, created_at=NOW.isoformat())
+    decision = make_decision(intervention="retry_after_date", scheduled_for=(NOW + timedelta(hours=4)).isoformat())
+    assert bs._matches_correct_strategy(case, decision, latent, NOW) is False
+
+
+def test_bank_downtime_succeeds_once_resolves_after_days_has_passed():
+    latent = {
+        "recoverable": True, "correct_strategy": "backoff", "resolves_after_days": 1,
+    }
+    case = make_case(reason_category="bank_downtime", latent=latent, created_at=NOW.isoformat())
+    decision = make_decision(intervention="retry_after_date", scheduled_for=(NOW + timedelta(days=1)).isoformat())
+    assert bs._matches_correct_strategy(case, decision, latent, NOW) is True
+
+
+def test_mandate_revoked_needs_no_extra_timing_check():
+    latent = {"recoverable": True, "correct_strategy": "request_re_mandate"}
+    case = make_case(reason_category="mandate_revoked", latent=latent)
+    decision = make_decision(intervention="request_re_mandate")
+    assert bs._matches_correct_strategy(case, decision, latent, NOW) is True
+
+
+# ---------------------------------------------------------------------------
+# _maybe_route_reply
+# ---------------------------------------------------------------------------
+
+def test_no_reply_route_for_non_outreach_intervention():
+    case = make_case()
+    latent = {**case["latent"], "responds_to_outreach": True, "reply_intent": "opt_out"}
+    decision = make_decision(intervention="retry_after_date")
+    assert bs._maybe_route_reply(case, decision, latent, NOW) is None
+
+
+def test_no_reply_route_when_customer_does_not_respond():
+    case = make_case()
+    latent = {**case["latent"], "responds_to_outreach": False, "reply_intent": "promise_to_pay"}
+    decision = make_decision(intervention="send_link")
+    assert bs._maybe_route_reply(case, decision, latent, NOW) is None
+
+
+def test_opt_out_reply_halts_and_returns_false(fake_repo):
+    case = make_case()
+    latent = {**case["latent"], "responds_to_outreach": True, "reply_intent": "opt_out"}
+    decision = make_decision(intervention="send_link")
+    result = bs._maybe_route_reply(case, decision, latent, NOW)
+    assert result is False
+    assert case["opted_out"] is True
+    assert fake_repo.case_updates[-1]["opted_out"] is True
+
+
+def test_dispute_reply_escalates_and_returns_false(fake_repo):
+    case = make_case()
+    latent = {**case["latent"], "responds_to_outreach": True, "reply_intent": "dispute"}
+    decision = make_decision(intervention="send_link")
+    result = bs._maybe_route_reply(case, decision, latent, NOW)
+    assert result is False
+    assert case["state"] == "ESCALATED"
+
+
+@pytest.mark.parametrize("intent", ["already_paid", "pay_now"])
+def test_already_paid_and_pay_now_recover_immediately(intent):
+    case = make_case()
+    latent = {**case["latent"], "responds_to_outreach": True, "reply_intent": intent}
+    decision = make_decision(intervention="send_link")
+    assert bs._maybe_route_reply(case, decision, latent, NOW) is True
+
+
+def test_promise_to_pay_creates_a_promise_and_returns_false(fake_repo):
+    case = make_case()
+    latent = {**case["latent"], "responds_to_outreach": True, "reply_intent": "promise_to_pay", "promise_offset_days": 5}
+    decision = make_decision(intervention="send_link")
+    result = bs._maybe_route_reply(case, decision, latent, NOW)
+    assert result is False
+    assert case["state"] == "PROMISE_MADE"
+    assert len(fake_repo.promises) == 1
+    promise = next(iter(fake_repo.promises.values()))
+    assert promise["promised_date"] == (NOW.date() + timedelta(days=5)).isoformat()
+
+
+def test_promise_to_pay_is_capped_at_max_promise_horizon_days(fake_repo):
+    case = make_case()
+    horizon = DEFAULT_POLICY["max_promise_horizon_days"]
+    latent = {
+        **case["latent"], "responds_to_outreach": True, "reply_intent": "promise_to_pay",
+        "promise_offset_days": horizon + 30,
+    }
+    decision = make_decision(intervention="send_link")
+    bs._maybe_route_reply(case, decision, latent, NOW)
+    promise = next(iter(fake_repo.promises.values()))
+    assert promise["promised_date"] == (NOW.date() + timedelta(days=horizon)).isoformat()
+
+
+def test_unclear_reply_has_no_override():
+    case = make_case()
+    latent = {**case["latent"], "responds_to_outreach": True, "reply_intent": "unclear"}
+    decision = make_decision(intervention="send_link")
+    assert bs._maybe_route_reply(case, decision, latent, NOW) is None
+
+
+# ---------------------------------------------------------------------------
+# naive baseline
+# ---------------------------------------------------------------------------
+
+def test_naive_recovers_only_technical_other_when_recoverable():
+    recoverable = {"recoverable": True}
+    unrecoverable = {"recoverable": False}
+    assert bs._naive_recovers({"reason_category": "technical_other", "latent": recoverable}) is True
+    assert bs._naive_recovers({"reason_category": "technical_other", "latent": unrecoverable}) is False
+    for reason in ("insufficient_funds", "bank_downtime", "mandate_revoked", "expired_card", "checkout_dropoff"):
+        assert bs._naive_recovers({"reason_category": reason, "latent": recoverable}) is False
+
+
+def test_naive_baseline_aggregates_across_the_dataset(monkeypatch):
+    dataset = [
+        {"reason_category": "technical_other", "amount": 100.0, "latent": {"recoverable": True}},
+        {"reason_category": "technical_other", "amount": 200.0, "latent": {"recoverable": False}},
+        {"reason_category": "insufficient_funds", "amount": 300.0, "latent": {"recoverable": True}},
+    ]
+    monkeypatch.setattr(bs, "_load_dataset", lambda set_name: dataset)
+    result = bs.naive_baseline("dev")
+    assert result == {
+        "recovered_count": 1,
+        "recovered_value": 100.0,
+        "total_count": 3,
+        "at_risk_value": 600.0,
+    }
+
+
+# ---------------------------------------------------------------------------
+# run_batch — end to end wiring, small crafted datasets, fake repo
+# ---------------------------------------------------------------------------
+
+def test_run_batch_diagnoses_and_recovers_a_same_day_case(monkeypatch, fake_repo):
+    """checkout_dropoff, touch 1, customer says pay_now — should resolve on
+    day 0, no waiting needed."""
+    case = make_case(
+        id="case_checkout1", source="checkout", reason_category="checkout_dropoff",
+        reason_raw="Order created but not paid within window",
+        latent={
+            "recoverable": True, "correct_strategy": "nudge_then_offer",
+            "responds_to_outreach": True, "reply_intent": "pay_now",
+            "reply_text_hinglish": "ok kar deta hun abhi",
+            "promise_offset_days": None, "keeps_promise": None,
+            "salary_day": None, "resolves_after_days": None,
+        },
+    )
+    monkeypatch.setattr(bs, "_load_dataset", lambda set_name: [case])
+
+    result = bs.run_batch("dev", horizon_days=3, live=False, now=NOW, persist="supabase")
+
+    assert result["recovered_count"] == 1
+    assert result["total_cases"] == 1
+    stored = fake_repo.cases["case_checkout1"]
+    assert stored["state"] == "RECOVERED"
+    assert stored["recovered_amount"] == 499.0
+
+
+def test_run_batch_mandate_debit_takes_at_least_two_days(monkeypatch, fake_repo):
+    """insufficient_funds: day 0 must only send the pre-debit notice, never
+    attempt the charge the same day it was diagnosed."""
+    case = make_case(id="case_if1")
+    monkeypatch.setattr(bs, "_load_dataset", lambda set_name: [case])
+
+    bs.run_batch("dev", horizon_days=1, live=False, now=NOW, persist="supabase")
+
+    assert fake_repo.attempts_by_key == {}  # no charge attempted on day 0
+    notices = [o for o in fake_repo.outreach if o["channel"] == "pre_debit_notice"]
+    assert len(notices) == 1
+    assert fake_repo.cases["case_if1"]["state"] == "SCHEDULED"
+
+
+NEAR_MONTH_END = datetime(2026, 9, 26, 9, 0, tzinfo=timezone.utc)  # 4 days to month-end, well inside the 14-day grace period
+
+
+def test_run_batch_mandate_debit_charges_once_notice_and_schedule_are_both_ready(monkeypatch, fake_repo):
+    """Give the case a salary_day that aligns with the month-end guess, and
+    run long enough for both the notice to age and the guessed date to
+    arrive — the charge should fire and recover the case."""
+    case = make_case(
+        id="case_if2", created_at=NEAR_MONTH_END.isoformat(),
+        latent={**make_case()["latent"], "salary_day": 30},
+    )
+    monkeypatch.setattr(bs, "_load_dataset", lambda set_name: [case])
+
+    result = bs.run_batch("dev", horizon_days=10, live=False, now=NEAR_MONTH_END, persist="supabase")
+
+    assert len(fake_repo.attempts_by_key) == 1
+    assert fake_repo.cases["case_if2"]["state"] == "RECOVERED"
+    assert result["recovered_count"] == 1
+
+
+def test_run_batch_pre_debit_notice_decision_is_not_recomputed_while_waiting(monkeypatch, fake_repo):
+    """Regression guard: if decide() were re-run every waiting day, a fresh
+    salary-day guess relative to the shifting 'now' could keep pushing the
+    target out of reach. The scheduled_for on the eventual attempt must match
+    day 0's original guess."""
+    case = make_case(
+        id="case_if3", created_at=NEAR_MONTH_END.isoformat(),
+        latent={**make_case()["latent"], "salary_day": 30},
+    )
+    monkeypatch.setattr(bs, "_load_dataset", lambda set_name: [case])
+
+    bs.run_batch("dev", horizon_days=10, live=False, now=NEAR_MONTH_END, persist="supabase")
+
+    attempt = next(iter(fake_repo.attempts_by_key.values()))
+    assert attempt["scheduled_for"].startswith("2026-09-30")
+
+
+def test_run_batch_writes_a_snapshot(monkeypatch, fake_repo, no_snapshot_file):
+    case = make_case(id="case_x", reason_category="mandate_revoked",
+                      reason_raw="Mandate has been revoked by the customer",
+                      latent={"recoverable": False, "correct_strategy": "request_re_mandate",
+                              "responds_to_outreach": False, "reply_intent": "none",
+                              "reply_text_hinglish": None, "promise_offset_days": None,
+                              "keeps_promise": None, "salary_day": None, "resolves_after_days": None})
+    monkeypatch.setattr(bs, "_load_dataset", lambda set_name: [case])
+
+    result = bs.run_batch("dev", horizon_days=2, live=False, now=NOW, persist="supabase")
+
+    assert no_snapshot_file["path"] == "data/results_dev.json"
+    assert no_snapshot_file["data"] is result
+    assert result["total_cases"] == 1
+
+
+def test_run_batch_returns_the_expected_metrics_shape(monkeypatch, fake_repo):
+    case = make_case(id="case_shape")
+    monkeypatch.setattr(bs, "_load_dataset", lambda set_name: [case])
+
+    result = bs.run_batch("dev", horizon_days=1, live=False, now=NOW, persist="supabase")
+
+    for key in (
+        "total_cases", "at_risk_value", "recovered_count", "recovered_value",
+        "recovery_rate_count", "recovery_rate_value", "recovery_lift", "ceiling_capture",
+        "recovery_by_reason", "gate_block_counts", "exception_list",
+    ):
+        assert key in result
+
+
+# ---------------------------------------------------------------------------
+# --limit / diagnostic slicing
+# ---------------------------------------------------------------------------
+
+def test_limit_processes_only_the_first_n_cases(monkeypatch, fake_repo):
+    dataset = [make_case(id=f"case_{i}", reason_category="mandate_revoked",
+                          reason_raw="Mandate has been revoked by the customer",
+                          latent={"recoverable": False, "correct_strategy": "request_re_mandate",
+                                  "responds_to_outreach": False, "reply_intent": "none",
+                                  "reply_text_hinglish": None, "promise_offset_days": None,
+                                  "keeps_promise": None, "salary_day": None, "resolves_after_days": None})
+               for i in range(5)]
+    monkeypatch.setattr(bs, "_load_dataset", lambda set_name: dataset)
+
+    result = bs.run_batch("dev", horizon_days=1, live=False, now=NOW, limit=2, persist="supabase")
+
+    assert result["total_cases"] == 2
+    assert len(fake_repo.cases) == 2
+    assert set(fake_repo.cases) == {"case_0", "case_1"}
+
+
+def test_limit_none_processes_the_whole_dataset(monkeypatch, fake_repo):
+    dataset = [make_case(id=f"case_{i}") for i in range(3)]
+    monkeypatch.setattr(bs, "_load_dataset", lambda set_name: dataset)
+
+    result = bs.run_batch("dev", horizon_days=1, live=False, now=NOW, persist="supabase")
+
+    assert result["total_cases"] == 3
+
+
+# ---------------------------------------------------------------------------
+# progress output
+# ---------------------------------------------------------------------------
+
+def test_progress_output_prints_one_line_per_simulated_day(monkeypatch, fake_repo, capsys):
+    case = make_case(id="case_progress", reason_category="mandate_revoked",
+                      reason_raw="Mandate has been revoked by the customer",
+                      latent={"recoverable": False, "correct_strategy": "request_re_mandate",
+                              "responds_to_outreach": False, "reply_intent": "none",
+                              "reply_text_hinglish": None, "promise_offset_days": None,
+                              "keeps_promise": None, "salary_day": None, "resolves_after_days": None})
+    monkeypatch.setattr(bs, "_load_dataset", lambda set_name: [case])
+
+    bs.run_batch("dev", horizon_days=4, live=False, now=NOW, persist="supabase")
+
+    lines = [l for l in capsys.readouterr().out.splitlines() if l.strip().startswith("day ")]
+    assert len(lines) == 4
+    assert "day   1/4" in lines[0]
+    assert "day   4/4" in lines[3]
+    for line in lines:
+        assert "active=" in line
+        assert "recovered=" in line
+        assert "elapsed=" in line
+
+
+def test_progress_output_tracks_active_and_recovered_counts(monkeypatch, fake_repo, capsys):
+    """checkout_dropoff + pay_now recovers same-day, so day 1 already shows
+    it: active drops to 0, recovered climbs to 1, and stays there."""
+    case = make_case(
+        id="case_progress2", source="checkout", reason_category="checkout_dropoff",
+        reason_raw="Order created but not paid within window",
+        latent={
+            "recoverable": True, "correct_strategy": "nudge_then_offer",
+            "responds_to_outreach": True, "reply_intent": "pay_now",
+            "reply_text_hinglish": "ok kar deta hun abhi",
+            "promise_offset_days": None, "keeps_promise": None,
+            "salary_day": None, "resolves_after_days": None,
+        },
+    )
+    monkeypatch.setattr(bs, "_load_dataset", lambda set_name: [case])
+
+    bs.run_batch("dev", horizon_days=2, live=False, now=NOW, persist="supabase")
+
+    lines = [l for l in capsys.readouterr().out.splitlines() if l.strip().startswith("day ")]
+    assert "active=   0" in lines[0]
+    assert "recovered=   1" in lines[0]
+    assert "recovered=   1" in lines[1]
+
+
+# ---------------------------------------------------------------------------
+# persist="memory" (the default) — swaps in app/db/memory_repository.py for
+# the whole run, then bulk-flushes to Supabase via repository.bulk_insert.
+# None of these use the fake_repo fixture: persist="memory" ignores whatever
+# repository.* currently is and swaps in its own MemoryRepository, which is
+# exactly the point.
+# ---------------------------------------------------------------------------
+
+def mandate_revoked_case(**overrides) -> dict:
+    case = make_case(
+        reason_category="mandate_revoked",
+        reason_raw="Mandate has been revoked by the customer",
+        latent={
+            "recoverable": False, "correct_strategy": "request_re_mandate",
+            "responds_to_outreach": False, "reply_intent": "none",
+            "reply_text_hinglish": None, "promise_offset_days": None,
+            "keeps_promise": None, "salary_day": None, "resolves_after_days": None,
+        },
+    )
+    case.update(overrides)
+    return case
+
+
+# ---------------------------------------------------------------------------
+# _strip_generated_ids — DB-generated ids must never be written by the flush
+# ---------------------------------------------------------------------------
+
+def test_strip_generated_ids_removes_id_for_db_generated_tables():
+    rows = [{"id": "abc-123", "case_id": "c1"}, {"id": "def-456", "case_id": "c2"}]
+    for table in ("payment_attempts", "outreach", "promises", "audit_log"):
+        stripped = bs._strip_generated_ids(table, rows)
+        assert all("id" not in row for row in stripped)
+        assert all(row["case_id"] for row in stripped)  # other fields survive
+
+
+def test_strip_generated_ids_keeps_id_for_cases():
+    rows = [{"id": "case_1", "amount": 499.0}]
+    stripped = bs._strip_generated_ids("cases", rows)
+    assert stripped[0]["id"] == "case_1"
+
+
+def test_strip_generated_ids_does_not_mutate_the_input():
+    rows = [{"id": "abc-123"}]
+    bs._strip_generated_ids("outreach", rows)
+    assert rows[0]["id"] == "abc-123"  # original untouched
+
+
+def test_flush_strips_ids_for_every_table_except_cases(monkeypatch):
+    """End-to-end: audit_log.id is bigserial (DB-generated) — the classic
+    case this whole fix targets — and outreach.id is a uuid default. Neither
+    should reach bulk_insert; cases.id (the text PK from the dataset) must.
+
+    Restores REAL audit logging for this one test (overriding the autouse
+    no_audit_writes fixture) so there's an actual audit_log row to check.
+    """
+    monkeypatch.setattr(audit_log_module, "record", _REAL_AUDIT_RECORD)
+    monkeypatch.setattr(audit_log_module, "gate", _REAL_AUDIT_GATE)
+    monkeypatch.setattr(audit_log_module, "error", _REAL_AUDIT_ERROR)
+    monkeypatch.setattr(audit_log_module, "money_action", _REAL_AUDIT_MONEY_ACTION)
+
+    flushed = []
+    monkeypatch.setattr(
+        repository_module, "bulk_insert",
+        lambda table, rows, chunk_size=500: flushed.append((table, list(rows))) or len(rows),
+    )
+    case = mandate_revoked_case(id="case_flush_ids")
+    monkeypatch.setattr(bs, "_load_dataset", lambda set_name: [case])
+
+    bs.run_batch("dev", horizon_days=1, live=False, now=NOW)
+
+    by_table = dict(flushed)
+    assert all("id" in row for row in by_table["cases"])
+    assert by_table["audit_log"], "expected at least one audit row to exercise the strip"
+    for table in ("payment_attempts", "outreach", "promises", "audit_log"):
+        assert all("id" not in row for row in by_table[table])
+
+
+def test_persist_memory_is_the_default(monkeypatch):
+    """No fake_repo fixture here on purpose: persist='memory' must work with
+    whatever repository.* happens to be — it swaps its own backend in."""
+    flushed = []
+    monkeypatch.setattr(
+        repository_module, "bulk_insert",
+        lambda table, rows, chunk_size=500: flushed.append((table, list(rows))) or len(rows),
+    )
+    case = mandate_revoked_case(id="case_mem1")
+    monkeypatch.setattr(bs, "_load_dataset", lambda set_name: [case])
+
+    result = bs.run_batch("dev", horizon_days=2, live=False, now=NOW)  # persist omitted -> "memory"
+
+    assert result["total_cases"] == 1
+    tables = {t for t, _ in flushed}
+    assert tables == {"cases", "payment_attempts", "outreach", "promises", "audit_log"}
+    cases_flushed = next(rows for t, rows in flushed if t == "cases")
+    assert len(cases_flushed) == 1
+    assert cases_flushed[0]["id"] == "case_mem1"
+
+
+def test_persist_memory_explicit_matches_the_default(monkeypatch):
+    flushed = []
+    monkeypatch.setattr(
+        repository_module, "bulk_insert",
+        lambda table, rows, chunk_size=500: flushed.append((table, list(rows))) or len(rows),
+    )
+    case = mandate_revoked_case(id="case_mem2")
+    monkeypatch.setattr(bs, "_load_dataset", lambda set_name: [case])
+
+    bs.run_batch("dev", horizon_days=2, live=False, now=NOW, persist="memory")
+
+    assert any(t == "cases" for t, _ in flushed)
+
+
+def test_persist_memory_restores_the_real_repository_functions_afterward(monkeypatch):
+    """The swap must not leak: once run_batch() returns, app.db.repository's
+    functions must be exactly what they were before, not left pointing at a
+    now-discarded MemoryRepository instance."""
+    monkeypatch.setattr(repository_module, "bulk_insert", lambda *a, **k: 0)
+    originals = {name: getattr(repository_module, name) for name in bs._REPOSITORY_FUNCTIONS}
+
+    case = mandate_revoked_case(id="case_mem3")
+    monkeypatch.setattr(bs, "_load_dataset", lambda set_name: [case])
+    bs.run_batch("dev", horizon_days=1, live=False, now=NOW)
+
+    for name, fn in originals.items():
+        assert getattr(repository_module, name) is fn
+
+
+def test_persist_supabase_never_flushes(fake_repo, monkeypatch):
+    """persist='supabase' means every call already hit 'the database' as it
+    happened — there's nothing to bulk-flush afterward."""
+    flushed = []
+    monkeypatch.setattr(repository_module, "bulk_insert", lambda *a, **k: flushed.append(a) or 0)
+    case = mandate_revoked_case(id="case_sb1")
+    monkeypatch.setattr(bs, "_load_dataset", lambda set_name: [case])
+
+    bs.run_batch("dev", horizon_days=1, live=False, now=NOW, persist="supabase")
+
+    assert flushed == []
+
+
+def test_persist_invalid_value_raises(monkeypatch):
+    case = mandate_revoked_case()
+    monkeypatch.setattr(bs, "_load_dataset", lambda set_name: [case])
+    with pytest.raises(ValueError):
+        bs.run_batch("dev", horizon_days=1, live=False, now=NOW, persist="nope")
+
+
+def test_persist_memory_runs_the_real_dev_dataset_in_seconds(monkeypatch):
+    """The actual point of persist='memory': the real 100-case dev set, the
+    default 21-day horizon, no fakes standing in for the dataset — must run
+    at Python speed, not network speed. A generous ceiling (real hardware
+    finishes this in well under a second) still catches an accidental
+    reintroduction of a per-call network round trip.
+
+    Deliberately does NOT pin `now`: the dataset's created_at values are
+    relative to whenever it was generated, and a fixed historical `now`
+    could push every case's age past grace_period_days before it's even
+    processed — this test is about speed, not a specific outcome mix."""
+    import time as time_module
+
+    monkeypatch.setattr(repository_module, "bulk_insert", lambda *a, **k: 0)
+
+    started = time_module.perf_counter()
+    result = bs.run_batch("dev")  # real dataset, default horizon_days=21, persist="memory"
+    elapsed = time_module.perf_counter() - started
+
+    assert result["total_cases"] == 100
+    assert elapsed < 10.0

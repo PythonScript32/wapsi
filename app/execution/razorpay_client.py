@@ -28,9 +28,25 @@ def _client() -> razorpay.Client:
     return razorpay.Client(auth=(config.RAZORPAY_KEY_ID, config.RAZORPAY_KEY_SECRET))
 
 
-def create_payment_link(amount: float, customer: str, idempotency_key: str) -> dict:
+_CUSTOMER_FIELDS = ("name", "contact", "email")
+
+
+def _customer_payload(customer: dict) -> dict:
+    """Keep only the fields Razorpay's customer object understands, and only
+    the ones that actually have a value — an empty/None field is worse than
+    an absent one (some of Razorpay's validation rejects blank strings)."""
+    if not isinstance(customer, dict):
+        return {}
+    return {k: customer[k] for k in _CUSTOMER_FIELDS if customer.get(k)}
+
+
+def create_payment_link(amount: float, customer: dict, idempotency_key: str, *, purpose: str = "payment") -> dict:
     """
     Create a TEST-mode Razorpay Payment Link for `amount` rupees.
+
+    customer: {"name": ..., "contact": ..., "email": ...} — passed through as
+    Razorpay's own `customer` object so the link pre-fills their details.
+    Never interpolated into text: a dict has no business inside `description`.
 
     The Payment Link API has no native idempotency-key header, so the key is
     stashed in reference_id/notes purely as a debugging trail back to the
@@ -42,7 +58,8 @@ def create_payment_link(amount: float, customer: str, idempotency_key: str) -> d
     data = {
         "amount": paise,
         "currency": "INR",
-        "description": f"Wapsi recovery - {customer}",
+        "description": f"Wapsi recovery - Rs {float(amount):,.0f} {purpose}",
+        "customer": _customer_payload(customer),
         "reference_id": idempotency_key,
         "notes": {"idempotency_key": idempotency_key},
     }

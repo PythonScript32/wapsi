@@ -13,6 +13,7 @@ agent runs in memory.
 """
 from __future__ import annotations
 
+import sys
 from datetime import datetime, timezone
 from typing import Any
 
@@ -255,3 +256,42 @@ def clear_batch(batch_id: str) -> None:
     it, and that is precisely the point of an append-only log.
     """
     get_client().table("cases").delete().eq("batch_id", batch_id).execute()
+
+
+def bulk_insert(table: str, rows: list[dict], chunk_size: int = 500) -> int:
+    """
+    Insert `rows` into `table` in chunks of `chunk_size`, one insert call per
+    chunk instead of one per row. Returns the number of rows actually
+    inserted (a chunk that hits a duplicate-key conflict is skipped, not
+    counted).
+
+    This is how app/detection/batch_scanner.py flushes a batch that ran
+    against app/db/memory_repository.py: tens of thousands of individual
+    round trips become a handful of bulk calls, one (or a few) per table.
+
+    FAILURE POLICY: a duplicate-key conflict on one chunk (e.g. re-flushing a
+    batch whose cases are already in Supabase from a prior run) is logged and
+    skipped so the rest of the flush still lands, rather than losing every
+    later chunk over one bad one. Any other error still raises — a real
+    outage or a malformed row should not be swallowed.
+    """
+    if not rows:
+        return 0
+    client = get_client()
+    inserted = 0
+    for i in range(0, len(rows), chunk_size):
+        chunk = rows[i:i + chunk_size]
+        try:
+            client.table(table).insert(chunk).execute()
+            inserted += len(chunk)
+        except Exception as exc:
+            text = str(exc).lower()
+            if "duplicate" in text or "unique" in text or "23505" in text:
+                print(
+                    f"[repository] WARNING bulk_insert into {table!r} skipped a chunk of "
+                    f"{len(chunk)} rows (offset {i}) on a duplicate-key conflict: {exc}",
+                    file=sys.stderr,
+                )
+                continue
+            raise
+    return inserted

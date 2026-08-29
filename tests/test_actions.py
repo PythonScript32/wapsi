@@ -82,9 +82,13 @@ class FakeRazorpay:
     def __init__(self, fail_times: int = 0):
         self.fail_times = fail_times
         self.calls = 0
+        self.last_customer = None
+        self.last_purpose = None
 
-    def create_payment_link(self, amount, customer, idempotency_key):
+    def create_payment_link(self, amount, customer, idempotency_key, *, purpose="payment"):
         self.calls += 1
+        self.last_customer = customer
+        self.last_purpose = purpose
         if self.calls <= self.fail_times:
             raise ConnectionError(f"simulated Razorpay outage (call {self.calls})")
         return {"id": f"plink_{idempotency_key}", "status": "created"}
@@ -269,6 +273,22 @@ def test_failure_then_recovery_within_the_retry_budget_succeeds(fake_repo, monke
     assert attempt["result"] == "success"
 
 
+def test_razorpay_call_gets_a_customer_dict_not_a_string(fake_repo, monkeypatch):
+    fake_rp = FakeRazorpay()
+    monkeypatch.setattr(actions.razorpay_client, "create_payment_link", fake_rp.create_payment_link)
+
+    case = make_case(
+        reason_category="checkout_dropoff", source="checkout", attempts_made=1,
+        customer_ref="Priya Sharma", customer_phone="98765**43",
+    )
+    decision = make_decision(intervention="send_link_with_offer", discount_pct=10.0)
+
+    actions.execute(decision, case, DEFAULT_POLICY, live=True, now=NOW)
+
+    assert fake_rp.last_customer == {"name": "Priya Sharma", "contact": "98765**43"}
+    assert fake_rp.last_purpose == "checkout completion"
+
+
 # ---------------------------------------------------------------------------
 # pre-debit notice flow (gate G9)
 # ---------------------------------------------------------------------------
@@ -288,10 +308,14 @@ def test_mandate_debit_first_call_sends_notice_and_defers_the_charge(fake_repo):
     assert fake_repo.outreach[0]["channel"] == "pre_debit_notice"
     assert fake_repo.attempts_by_key == {}  # no charge attempted yet
     assert fake_repo.case_updates == []     # state untouched this cycle
+    # the scheduler needs to know when to re-queue this case
+    expected_retry_at = NOW + timedelta(hours=DEFAULT_POLICY["rbi_pre_debit_notice_hours"])
+    assert result["retry_at"] == expected_retry_at.isoformat()
 
 
 def test_mandate_debit_waits_while_notice_is_still_aging(fake_repo):
-    fake_repo.pre_debit_notice_at = (NOW - timedelta(hours=2)).isoformat()  # < 24h
+    notice_sent_at = NOW - timedelta(hours=2)
+    fake_repo.pre_debit_notice_at = notice_sent_at.isoformat()  # < 24h
 
     case = make_case(reason_category="insufficient_funds")
     decision = make_decision(intervention="retry_after_date", is_mandate_debit=True)
@@ -302,6 +326,9 @@ def test_mandate_debit_waits_while_notice_is_still_aging(fake_repo):
     assert result["gate"] is None  # deferred before ever reaching the gate
     assert fake_repo.attempts_by_key == {}
     assert len(fake_repo.outreach) == 0  # notice not re-sent
+    # without retry_at, a mandate-debit case would stall forever
+    expected_retry_at = notice_sent_at + timedelta(hours=DEFAULT_POLICY["rbi_pre_debit_notice_hours"])
+    assert result["retry_at"] == expected_retry_at.isoformat()
 
 
 def test_mandate_debit_charges_once_the_notice_has_aged(fake_repo):

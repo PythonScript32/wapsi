@@ -39,7 +39,7 @@ production. Only app/detection/batch_scanner.py may read that field.
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from app.audit import log as audit_log
@@ -96,6 +96,14 @@ def _fmt_amount(amount: Any) -> str:
 
 def _fmt_date(dt: datetime) -> str:
     return dt.strftime("%d %b")
+
+
+def _customer_payload(case: dict) -> dict:
+    return {"name": case.get("customer_ref"), "contact": case.get("customer_phone")}
+
+
+def _purpose_for(case: dict) -> str:
+    return "subscription renewal" if case.get("source") == "subscription" else "checkout completion"
 
 
 # ---------------------------------------------------------------------------
@@ -205,9 +213,11 @@ def _ensure_pre_debit_notice(case: dict, decision: dict, policy: dict, context: 
 
     elapsed_hours = (now - notice_at).total_seconds() / 3600
     if elapsed_hours < notice_hours:
+        retry_at = notice_at + timedelta(hours=notice_hours)
         return {
             "executed": False,
             "gate": None,
+            "retry_at": retry_at.isoformat(),
             "reason": (
                 f"Pre-debit notice sent {elapsed_hours:.1f}h ago; RBI requires "
                 f"{notice_hours}h. Deferring the charge until it ages rather than "
@@ -256,10 +266,12 @@ def _send_pre_debit_notice(case: dict, decision: dict, policy: dict, context: di
         result=row,
     )
 
+    retry_at = now + timedelta(hours=notice_hours)
     return {
         "executed": True,
         "intervention": "pre_debit_notice",
         "gate": None,
+        "retry_at": retry_at.isoformat(),
         "reason": "Pre-debit notice sent; the charge is deferred until it ages.",
     }
 
@@ -314,8 +326,9 @@ def _execute_money(action: dict, case: dict, decision: dict, policy: dict, *, li
         result = _with_backoff(
             lambda: razorpay_client.create_payment_link(
                 amount=action.get("amount"),
-                customer=case.get("customer_ref"),
+                customer=_customer_payload(case),
                 idempotency_key=idem_key,
+                purpose=_purpose_for(case),
             ),
             delays,
         )
