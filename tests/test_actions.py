@@ -383,6 +383,25 @@ def test_g3_block_translates_to_escalated(fake_repo):
     assert fake_repo.outreach == []  # never sent — blocked before execution
 
 
+def test_g3_block_on_checkout_dropoff_translates_to_closed_lost_not_escalated(fake_repo):
+    """PRD FR-B5: checkout_dropoff gets two touches then CLOSED_LOST, not an
+    escalation — an abandoned cart doesn't warrant a human. Every other
+    reason still escalates on G3 (see the bank_downtime test above); only
+    the translation differs, the gate is still what decided the cap bound."""
+    case = make_case(reason_category="checkout_dropoff", source="checkout", attempts_made=2)  # cap is 2
+    decision = make_decision(intervention="send_link_with_offer", discount_pct=10.0)
+
+    result = actions.execute(decision, case, DEFAULT_POLICY, live=False, now=NOW)
+
+    assert result["executed"] is True
+    assert result["intervention"] == "close_lost"
+    assert result["gate"] == "G3"
+    assert any(u.get("state") == "CLOSED_LOST" for u in fake_repo.case_updates)
+    assert not any(u.get("state") == "ESCALATED" for u in fake_repo.case_updates)
+    assert fake_repo.attempts_by_key == {}
+    assert fake_repo.outreach == []
+
+
 def test_g5_block_translates_to_closed_lost(fake_repo):
     case = make_case(created_at=(NOW - timedelta(days=20)).isoformat())  # grace is 14 days
     decision = make_decision(intervention="send_link")

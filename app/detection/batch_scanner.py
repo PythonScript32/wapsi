@@ -179,7 +179,7 @@ def _flush_to_supabase(backend: MemoryRepository) -> None:
 
 def run_batch(
     set_name: str = "dev",
-    horizon_days: int = 21,
+    horizon_days: int = 30,
     live: bool = False,
     *,
     persist: str = "memory",
@@ -187,6 +187,13 @@ def run_batch(
     now: datetime | None = None,
 ) -> dict:
     """
+    horizon_days=30: long enough for the slowest realistic path to actually
+    resolve inside the window — a salary-day retry that lands near the
+    grace_period_days (14) boundary, plus the notice-aging and backoff time
+    around it, can otherwise still be "active" when a shorter horizon runs
+    out. Whatever's still non-terminal at the end gets swept to CLOSED_LOST
+    (see below) rather than reported as neither recovered nor abandoned.
+
     persist="memory" (default): the whole pipeline runs against
     app/db/memory_repository.py — plain dicts and lists, no network — so a
     holdout-sized batch finishes in seconds. The finished run is bulk-flushed
@@ -254,6 +261,10 @@ def run_batch(
 
             clock.advance(1)
 
+        swept = _sweep_unresolved(cases, clock.now)
+        if swept:
+            print(f"  swept {swept:>4} unresolved cases -> CLOSED_LOST at end of horizon")
+
     if backend is not None:
         _flush_to_supabase(backend)
 
@@ -267,6 +278,34 @@ def run_batch(
     metrics.export_snapshot(result, out_path)
     result["_snapshot_path"] = out_path
     return result
+
+
+def _sweep_unresolved(cases: dict[str, dict], now: datetime) -> int:
+    """
+    End-of-horizon sweep: no case may finish a batch in a non-terminal
+    state. Anything still active when the observation window runs out
+    (including a case whose opt-out never got past its confirming G2 pass,
+    or one still mid-retry) is closed as CLOSED_LOST — an artifact of the
+    batch's finite horizon, not a governance verdict, so it logs its own
+    honest reason rather than borrowing G5's.
+    """
+    swept = 0
+    for case_id, case in cases.items():
+        if case["state"] in _TERMINAL_STATES:
+            continue
+        prior_state = case["state"]
+        repository.update_case(case_id, state="CLOSED_LOST")
+        case["state"] = "CLOSED_LOST"
+        audit_log.record(
+            case_id, _ACTOR, audit_log.CLOSED_LOST,
+            reasoning=(
+                f"Case was still {prior_state} when the batch's observation window ended "
+                f"on {now.date().isoformat()}, with no resolution in sight. Closing as lost "
+                "rather than reporting it as neither recovered nor actively pursued."
+            ),
+        )
+        swept += 1
+    return swept
 
 
 def _ingest(batch_id: str, raw_cases: list[dict]) -> dict[str, dict]:
@@ -686,7 +725,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Run the Wapsi recovery batch end to end.")
     ap.add_argument("--set", dest="set_name", default="dev", choices=["dev", "holdout"])
     ap.add_argument("--live", action="store_true", help="use the real Razorpay API instead of simulating")
-    ap.add_argument("--horizon-days", type=int, default=21)
+    ap.add_argument("--horizon-days", type=int, default=30)
     ap.add_argument("--limit", type=int, default=None, help="only process the first N cases (diagnostic runs)")
     ap.add_argument(
         "--persist", choices=["memory", "supabase"], default="memory",

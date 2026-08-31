@@ -466,7 +466,10 @@ def test_run_batch_diagnoses_and_recovers_a_same_day_case(monkeypatch, fake_repo
 
 def test_run_batch_mandate_debit_takes_at_least_two_days(monkeypatch, fake_repo):
     """insufficient_funds: day 0 must only send the pre-debit notice, never
-    attempt the charge the same day it was diagnosed."""
+    attempt the charge the same day it was diagnosed. A 1-day horizon means
+    the end-of-horizon sweep (fix: no case may finish non-terminal) closes
+    the still-SCHEDULED case as CLOSED_LOST — that's the correct, honest
+    outcome for "we didn't have time to see this through," not a bug."""
     case = make_case(id="case_if1")
     monkeypatch.setattr(bs, "_load_dataset", lambda set_name: [case])
 
@@ -475,7 +478,7 @@ def test_run_batch_mandate_debit_takes_at_least_two_days(monkeypatch, fake_repo)
     assert fake_repo.attempts_by_key == {}  # no charge attempted on day 0
     notices = [o for o in fake_repo.outreach if o["channel"] == "pre_debit_notice"]
     assert len(notices) == 1
-    assert fake_repo.cases["case_if1"]["state"] == "SCHEDULED"
+    assert fake_repo.cases["case_if1"]["state"] == "CLOSED_LOST"  # swept at horizon end
 
 
 NEAR_MONTH_END = datetime(2026, 9, 26, 9, 0, tzinfo=timezone.utc)  # 4 days to month-end, well inside the 14-day grace period
@@ -875,3 +878,83 @@ def test_gate_block_counts_are_not_lost_when_a_block_translates_to_terminal(monk
         1 for c in result["exception_list"] if c["state"] in ("ESCALATED", "CLOSED_LOST")
     )
     assert terminal_non_recovered > 0
+
+
+# ---------------------------------------------------------------------------
+# horizon: default 30 days, and an end-of-horizon sweep so no case finishes
+# a batch in a non-terminal state
+# ---------------------------------------------------------------------------
+
+def test_default_horizon_days_is_30():
+    import inspect
+    sig = inspect.signature(bs.run_batch)
+    assert sig.parameters["horizon_days"].default == 30
+
+
+def test_end_of_horizon_sweep_closes_a_still_active_case(monkeypatch, fake_repo):
+    """A single-day horizon leaves a freshly-outreached case well short of
+    resolving — the sweep must still close it rather than leave it dangling."""
+    case = mandate_revoked_case(id="case_sweep1")
+    monkeypatch.setattr(bs, "_load_dataset", lambda set_name: [case])
+
+    bs.run_batch("dev", horizon_days=1, live=False, now=NOW, persist="supabase")
+
+    assert fake_repo.cases["case_sweep1"]["state"] == "CLOSED_LOST"
+
+
+def test_end_of_horizon_sweep_logs_an_audit_row(monkeypatch, fake_repo):
+    calls = []
+    monkeypatch.setattr(audit_log_module, "record", lambda *a, **k: calls.append((a, k)))
+    case = mandate_revoked_case(id="case_sweep2")
+    monkeypatch.setattr(bs, "_load_dataset", lambda set_name: [case])
+
+    bs.run_batch("dev", horizon_days=1, live=False, now=NOW, persist="supabase")
+
+    sweep_calls = [
+        (args, kwargs) for args, kwargs in calls
+        if kwargs.get("reasoning", "").startswith("Case was still")
+    ]
+    assert len(sweep_calls) == 1
+    args, kwargs = sweep_calls[0]
+    assert args[0] == "case_sweep2"
+    assert args[2] == audit_log_module.CLOSED_LOST
+
+
+def test_sweep_does_not_touch_cases_already_terminal(monkeypatch, fake_repo):
+    """A same-day recovery must not get a spurious sweep audit row or have
+    its state clobbered."""
+    calls = []
+    monkeypatch.setattr(audit_log_module, "record", lambda *a, **k: calls.append((a, k)))
+    case = make_case(
+        id="case_recovered_early", source="checkout", reason_category="checkout_dropoff",
+        reason_raw="Order created but not paid within window",
+        latent={
+            "recoverable": True, "correct_strategy": "nudge_then_offer",
+            "responds_to_outreach": True, "reply_intent": "pay_now",
+            "reply_text_hinglish": "ok kar deta hun abhi",
+            "promise_offset_days": None, "keeps_promise": None,
+            "salary_day": None, "resolves_after_days": None,
+        },
+    )
+    monkeypatch.setattr(bs, "_load_dataset", lambda set_name: [case])
+
+    bs.run_batch("dev", horizon_days=1, live=False, now=NOW, persist="supabase")
+
+    assert fake_repo.cases["case_recovered_early"]["state"] == "RECOVERED"
+    sweep_calls = [kwargs for _, kwargs in calls if kwargs.get("reasoning", "").startswith("Case was still")]
+    assert sweep_calls == []
+
+
+def test_no_case_finishes_the_real_dev_batch_in_a_non_terminal_state(monkeypatch):
+    """The headline check for this fix: with the default 30-day horizon on
+    the real 100-case dataset, every case that isn't RECOVERED must be
+    CLOSED_LOST or ESCALATED — nothing left DETECTED/OUTREACH_SENT/etc."""
+    monkeypatch.setattr(repository_module, "bulk_insert", lambda *a, **k: 0)
+
+    result = bs.run_batch("dev", persist="memory")  # default horizon_days=30
+
+    assert result["recovered_count"] + len(result["exception_list"]) == result["total_cases"]
+    stray_states = {
+        c["state"] for c in result["exception_list"] if c["state"] not in ("CLOSED_LOST", "ESCALATED")
+    }
+    assert stray_states == set(), f"cases left non-terminal: {stray_states!r}"

@@ -180,7 +180,7 @@ def execute(decision: dict, case: dict, policy: dict, *, live: bool = False, now
             )
             result["gate"] = "G6"
             return result
-        terminal = _translate_gate_block(gate, case_id)
+        terminal = _translate_gate_block(gate, case)
         if terminal is not None:
             return terminal
         return {"executed": False, "gate": gate.gate, "reason": gate.reason}
@@ -189,7 +189,7 @@ def execute(decision: dict, case: dict, policy: dict, *, live: bool = False, now
     return _execute_allowed(action, case, decision, policy, live=live, now=now)
 
 
-def _translate_gate_block(gate: GateResult, case_id: str) -> dict | None:
+def _translate_gate_block(gate: GateResult, case: dict) -> dict | None:
     """
     The gate is the sole authority on the attempt cap (G3) and the grace
     period (G5) — app/decision/engine.py proposes without checking either.
@@ -197,17 +197,39 @@ def _translate_gate_block(gate: GateResult, case_id: str) -> dict | None:
     translated directly instead of leaving the case dangling in limbo.
     Returns None for every other gate: the caller just reports the block.
 
+    G3 normally means ESCALATED — a human should look at a case that's
+    burned through its retries. checkout_dropoff is the one exception: PRD
+    FR-B5 says two touches then CLOSED_LOST, not escalation. An abandoned
+    cart that didn't convert on a nudge or an offer doesn't warrant a human;
+    the gate's authority on WHETHER the cap binds doesn't change, only what
+    the cap-exceeded outcome means for this one reason.
+
     The returned result still carries "gate": gate.gate (overriding
     _apply_terminal's default None) — a caller counting gate_block_counts
     must see G3/G5 fired here, not just "executed: True". Losing that would
     make the gate's own enforcement invisible again, the exact problem this
     whole restructure exists to fix.
     """
+    case_id = case["id"]
+
     if gate.gate == "G3":
-        result = _apply_terminal(
-            case_id, "ESCALATED", audit_log.ESCALATED,
-            {"intervention": "escalate", "reasoning": gate.reason},
-        )
+        if case.get("reason_category") == "checkout_dropoff":
+            result = _apply_terminal(
+                case_id, "CLOSED_LOST", audit_log.CLOSED_LOST,
+                {
+                    "intervention": "close_lost",
+                    "reasoning": (
+                        f"{gate.reason} Per PRD FR-B5, checkout_dropoff closes as lost "
+                        "after its touch cap rather than escalating — an abandoned cart "
+                        "doesn't warrant a human."
+                    ),
+                },
+            )
+        else:
+            result = _apply_terminal(
+                case_id, "ESCALATED", audit_log.ESCALATED,
+                {"intervention": "escalate", "reasoning": gate.reason},
+            )
         result["gate"] = gate.gate
         return result
     if gate.gate == "G5":
@@ -351,7 +373,7 @@ def _send_pre_debit_notice(case: dict, decision: dict, policy: dict, context: di
     if not gate.allowed:
         # G3 can't apply to a plain outreach action, but G5 (grace period)
         # can — an aged-out case shouldn't even get its notice sent.
-        terminal = _translate_gate_block(gate, case_id)
+        terminal = _translate_gate_block(gate, case)
         if terminal is not None:
             return terminal
         return {"executed": False, "gate": gate.gate, "reason": gate.reason}
