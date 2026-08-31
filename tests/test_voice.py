@@ -1,0 +1,278 @@
+"""
+Voice inbound (Feature C) must never invent a promise and must never crash on
+a provider failure. Every test here mocks the LLM seam -- app.llm.client.call
+for text replies, app.llm.client.call_voice for audio replies -- so nothing
+touches the network, regardless of which provider is configured in the
+environment. See app/voice/inbound.py for the date-resolution and
+confidence rules under test.
+"""
+from __future__ import annotations
+
+import json
+from datetime import date, datetime, timedelta, timezone
+
+import pytest
+
+from app import config
+from app.voice import inbound
+
+NOW = datetime(2026, 8, 17, 9, 0, 0, tzinfo=timezone.utc)  # a Monday
+
+
+@pytest.fixture(autouse=True)
+def audit_spy(monkeypatch):
+    records: list[dict] = []
+    errors: list[dict] = []
+
+    def _record(case_id, actor, event_type, **kw):
+        records.append({"case_id": case_id, "actor": actor, "event_type": event_type, **kw})
+
+    def _error(case_id, actor, what, exc):
+        errors.append({"case_id": case_id, "actor": actor, "what": what, "exc": exc})
+
+    monkeypatch.setattr(inbound.audit_log, "record", _record)
+    monkeypatch.setattr(inbound.audit_log, "error", _error)
+
+    class Spy:
+        pass
+
+    spy = Spy()
+    spy.records = records
+    spy.errors = errors
+    return spy
+
+
+def reply_json(intent="promise_to_pay", transcript="kal kar dunga", raw_date_phrase="kal", confidence=0.9):
+    return json.dumps({
+        "transcript": transcript,
+        "intent": intent,
+        "raw_date_phrase": raw_date_phrase,
+        "confidence": confidence,
+    })
+
+
+def mock_text(monkeypatch, raw_reply):
+    monkeypatch.setattr(inbound.llm_client, "call", lambda prompt: raw_reply)
+
+
+def mock_audio(monkeypatch, transcript, raw_reply):
+    monkeypatch.setattr(inbound.llm_client, "call_voice", lambda prompt, audio, mime: (transcript, raw_reply))
+
+
+# ---------------------------------------------------------------------------
+# Every intent, via a representative transcript
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("intent,transcript,phrase", [
+    ("promise_to_pay", "kal kar dunga", "kal"),
+    ("already_paid", "maine already pay kar diya hai", None),
+    ("opt_out", "band kar do, mujhe mat bhejo", None),
+    ("pay_now", "abhi link bhejo, main pay karta hoon", None),
+    ("dispute", "yeh transaction meri nahi hai", None),
+])
+def test_each_intent_from_a_representative_text_transcript(monkeypatch, intent, transcript, phrase):
+    mock_text(monkeypatch, reply_json(intent=intent, transcript=transcript, raw_date_phrase=phrase, confidence=0.95))
+    result = inbound.parse_reply(text=transcript, ctx={"case_id": "c1", "now": NOW})
+    assert result["intent"] == intent
+    assert result["transcript"] == transcript
+
+
+def test_unclear_intent_from_the_model_passes_through(monkeypatch):
+    mock_text(monkeypatch, reply_json(intent="unclear", transcript="hmm kya?", raw_date_phrase=None, confidence=0.9))
+    result = inbound.parse_reply(text="hmm kya?", ctx={"now": NOW})
+    assert result["intent"] == "unclear"
+
+
+def test_opt_out_acceptance_example(monkeypatch):
+    mock_text(monkeypatch, reply_json(intent="opt_out", transcript="band kar do", raw_date_phrase=None, confidence=0.95))
+    result = inbound.parse_reply(text="band kar do", ctx={"now": NOW})
+    assert result["intent"] == "opt_out"
+
+
+# ---------------------------------------------------------------------------
+# Deterministic Hinglish date resolution -- every phrase from the spec
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("phrase,expected_offset_days", [
+    ("kal", 1),
+    ("parso", 2),
+    ("agle hafte", 7),
+    ("is hafte", 3),
+    ("5 din mein", 5),
+    ("12 din mein", 12),
+])
+def test_relative_day_phrases_resolve_correctly(phrase, expected_offset_days):
+    resolved = inbound._resolve_date_phrase(phrase, NOW)
+    assert resolved == (NOW + timedelta(days=expected_offset_days)).date()
+
+
+def test_agle_mahine_resolves_to_first_of_next_month():
+    assert inbound._resolve_date_phrase("agle mahine", NOW) == date(2026, 9, 1)
+
+
+def test_mahine_ke_end_resolves_to_month_end():
+    assert inbound._resolve_date_phrase("mahine ke end tak", NOW) == date(2026, 8, 31)
+
+
+def test_salary_ke_baad_resolves_to_next_salary_cluster_date():
+    # NOW = 17 Aug 2026: month-end (31 Aug) lands sooner than the 1st of next
+    # month, so that's the salary-cluster guess -- same heuristic as
+    # decision.engine._next_salary_day.
+    assert inbound._resolve_date_phrase("salary ke baad", NOW) == date(2026, 8, 31)
+
+
+def test_salary_aane_do_also_resolves_to_the_salary_cluster_date():
+    assert inbound._resolve_date_phrase("salary aane do", NOW) == date(2026, 8, 31)
+
+
+def test_unresolvable_phrase_returns_none():
+    assert inbound._resolve_date_phrase("jab mann karega", NOW) is None
+
+
+def test_none_phrase_returns_none():
+    assert inbound._resolve_date_phrase(None, NOW) is None
+
+
+def test_unresolvable_date_phrase_downgrades_promise_to_unclear(monkeypatch):
+    mock_text(monkeypatch, reply_json(
+        intent="promise_to_pay", transcript="jab time milega kar dunga",
+        raw_date_phrase="jab time milega", confidence=0.9,
+    ))
+    result = inbound.parse_reply(text="jab time milega kar dunga", ctx={"now": NOW})
+    assert result["intent"] == "unclear"
+    assert result["promised_date"] is None
+
+
+# ---------------------------------------------------------------------------
+# Horizon cap
+# ---------------------------------------------------------------------------
+
+def test_promised_date_is_capped_at_policy_horizon(monkeypatch):
+    mock_text(monkeypatch, reply_json(
+        intent="promise_to_pay", transcript="agle mahine kar dunga",
+        raw_date_phrase="agle mahine", confidence=0.9,
+    ))
+    policy = {**config.DEFAULT_POLICY, "max_promise_horizon_days": 5}
+    result = inbound.parse_reply(text="agle mahine kar dunga", ctx={"now": NOW, "policy": policy})
+    assert result["intent"] == "promise_to_pay"
+    assert result["promised_date"] == (NOW + timedelta(days=5)).date().isoformat()
+
+
+def test_promise_within_horizon_is_not_capped(monkeypatch):
+    mock_text(monkeypatch, reply_json(intent="promise_to_pay", transcript="kal kar dunga", raw_date_phrase="kal", confidence=0.9))
+    result = inbound.parse_reply(text="kal kar dunga", ctx={"now": NOW})
+    assert result["promised_date"] == (NOW + timedelta(days=1)).date().isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Never invent a promise: low confidence / empty transcript
+# ---------------------------------------------------------------------------
+
+def test_low_confidence_downgrades_to_unclear(monkeypatch):
+    mock_text(monkeypatch, reply_json(intent="already_paid", transcript="shayad pay ho gaya", raw_date_phrase=None, confidence=0.3))
+    result = inbound.parse_reply(text="shayad pay ho gaya", ctx={"now": NOW})
+    assert result["intent"] == "unclear"
+
+
+def test_audio_reply_with_empty_transcript_downgrades_to_unclear(monkeypatch):
+    mock_audio(monkeypatch, "", reply_json(intent="promise_to_pay", transcript="", raw_date_phrase="kal", confidence=0.9))
+    result = inbound.parse_reply(audio_bytes=b"some ogg bytes", ctx={"now": NOW})
+    assert result["intent"] == "unclear"
+    assert result["transcript"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Audio path: transcript comes from the whisper hint when present (Groq),
+# else from the model's own JSON (Gemini one-shot)
+# ---------------------------------------------------------------------------
+
+def test_audio_reply_uses_the_whisper_transcript_hint_when_present(monkeypatch):
+    mock_audio(monkeypatch, "kal kar dunga", reply_json(intent="promise_to_pay", transcript="IGNORED", raw_date_phrase="kal", confidence=0.9))
+    result = inbound.parse_reply(audio_bytes=b"...", ctx={"now": NOW})
+    assert result["transcript"] == "kal kar dunga"
+    assert result["promised_date"] == (NOW + timedelta(days=1)).date().isoformat()
+
+
+def test_audio_reply_reads_transcript_from_json_when_hint_is_none(monkeypatch):
+    mock_audio(monkeypatch, None, reply_json(intent="promise_to_pay", transcript="kal kar dunga", raw_date_phrase="kal", confidence=0.9))
+    result = inbound.parse_reply(audio_bytes=b"...", ctx={"now": NOW, "case_id": "c9"})
+    assert result["transcript"] == "kal kar dunga"
+    assert result["intent"] == "promise_to_pay"
+
+
+# ---------------------------------------------------------------------------
+# Provider failure -> unclear, degraded mode logged
+# ---------------------------------------------------------------------------
+
+def test_text_provider_failure_is_unclear_and_logs_degraded_mode(monkeypatch, audit_spy):
+    def boom(prompt):
+        raise RuntimeError("network exploded")
+    monkeypatch.setattr(inbound.llm_client, "call", boom)
+
+    result = inbound.parse_reply(text="kal kar dunga", ctx={"case_id": "c1", "now": NOW})
+
+    assert result["intent"] == "unclear"
+    assert len(audit_spy.errors) == 1
+    assert audit_spy.errors[0]["case_id"] == "c1"
+
+
+def test_malformed_json_reply_is_treated_as_a_provider_failure(monkeypatch, audit_spy):
+    monkeypatch.setattr(inbound.llm_client, "call", lambda prompt: "not json at all")
+
+    result = inbound.parse_reply(text="kal kar dunga", ctx={"now": NOW})
+
+    assert result["intent"] == "unclear"
+    assert len(audit_spy.errors) == 1
+
+
+def test_audio_provider_failure_is_unclear_and_degraded(monkeypatch, audit_spy):
+    def boom(prompt, audio, mime):
+        raise RuntimeError("groq down")
+    monkeypatch.setattr(inbound.llm_client, "call_voice", boom)
+
+    result = inbound.parse_reply(audio_bytes=b"...", ctx={"now": NOW})
+
+    assert result["intent"] == "unclear"
+    assert len(audit_spy.errors) == 1
+
+
+def test_no_audio_and_no_text_is_unclear_without_calling_the_provider(monkeypatch):
+    called = []
+    monkeypatch.setattr(inbound.llm_client, "call", lambda prompt: called.append(1))
+    monkeypatch.setattr(inbound.llm_client, "call_voice", lambda *a: called.append(1))
+
+    result = inbound.parse_reply(ctx={"now": NOW})
+
+    assert result["intent"] == "unclear"
+    assert called == []
+
+
+# ---------------------------------------------------------------------------
+# Audit trail
+# ---------------------------------------------------------------------------
+
+def test_reply_received_is_logged_with_transcript_and_intent(monkeypatch, audit_spy):
+    mock_text(monkeypatch, reply_json(intent="promise_to_pay", transcript="kal kar dunga", raw_date_phrase="kal", confidence=0.9))
+
+    inbound.parse_reply(text="kal kar dunga", ctx={"case_id": "c1", "now": NOW})
+
+    assert len(audit_spy.records) == 1
+    rec = audit_spy.records[0]
+    assert rec["event_type"] == inbound.audit_log.REPLY_RECEIVED
+    assert rec["decision"] == "promise_to_pay"
+    assert rec["result"]["transcript"] == "kal kar dunga"
+
+
+# ---------------------------------------------------------------------------
+# MIME type detection
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("path,expected", [
+    ("data/voice_samples/promise.ogg", "audio/ogg"),
+    ("voice.m4a", "audio/mp4"),
+    ("voice.mp3", "audio/mpeg"),
+    ("voice.wav", "audio/wav"),
+    ("voice.unknownext", "audio/ogg"),
+])
+def test_mime_type_for_path(path, expected):
+    assert inbound.mime_type_for_path(path) == expected
