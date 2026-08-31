@@ -26,6 +26,8 @@ SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")  # backend ONLY
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")            # runtime brain (free tier)
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")                # optional, faster free tier; preferred over Gemini when set
+GROQ_CHAT_MODEL = os.getenv("GROQ_CHAT_MODEL", "openai/gpt-oss-120b")
+GROQ_WHISPER_MODEL = os.getenv("GROQ_WHISPER_MODEL", "whisper-large-v3-turbo")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")    # outbound voice (stretch)
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "")
 

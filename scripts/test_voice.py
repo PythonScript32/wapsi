@@ -18,6 +18,14 @@ from pathlib import Path
 # -- not just this file's directory -- needs to be on sys.path to import app.*.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# Windows' console defaults to cp1252, which can't encode Devanagari --
+# transcripts here are real customer speech and may come back in either
+# script depending on what the ASR provider chose, so force UTF-8 rather
+# than crashing on a transcript we can't print.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 from app.voice import inbound  # noqa: E402
 
 _ACCEPTED_EXTS = {".ogg", ".m4a", ".mp3", ".wav"}
@@ -40,7 +48,7 @@ def main() -> int:
 
     result = inbound.parse_reply(
         audio_bytes=audio_bytes,
-        ctx={"mime_type": mime_type, "case_id": f"demo:{path.stem}"},
+        ctx={"mime_type": mime_type, "case_id": f"demo:{path.stem}", "debug": True},
     )
 
     print(f"file            : {path}")

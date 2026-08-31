@@ -136,7 +136,7 @@ def classify(case: dict) -> tuple[str, str]:
         )
         return category, "rule"
 
-    provider = "groq:llama-3.3-70b-versatile" if config.GROQ_API_KEY else f"gemini:{config.GEMINI_MODEL}"
+    provider = f"groq:{config.GROQ_CHAT_MODEL}" if config.GROQ_API_KEY else f"gemini:{config.GEMINI_MODEL}"
     actor = f"diagnosis.classifier:{provider}"
 
     try:
