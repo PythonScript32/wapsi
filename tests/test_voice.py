@@ -359,7 +359,7 @@ def test_text_provider_failure_is_unclear_and_logs_degraded_mode(monkeypatch, au
 def test_malformed_json_reply_is_treated_as_a_provider_failure(monkeypatch, audit_spy):
     monkeypatch.setattr(inbound.llm_client, "call", lambda prompt: "not json at all")
 
-    result = inbound.parse_reply(text="kal kar dunga", ctx={"now": NOW})
+    result = inbound.parse_reply(text="kal kar dunga", ctx={"case_id": "c1", "now": NOW})
 
     assert result["intent"] == "unclear"
     assert len(audit_spy.errors) == 1
@@ -370,10 +370,24 @@ def test_audio_provider_failure_is_unclear_and_degraded(monkeypatch, audit_spy):
         raise RuntimeError("groq down")
     monkeypatch.setattr(inbound.llm_client, "call_voice", boom)
 
-    result = inbound.parse_reply(audio_bytes=b"...", ctx={"now": NOW})
+    result = inbound.parse_reply(audio_bytes=b"...", ctx={"case_id": "c1", "now": NOW})
 
     assert result["intent"] == "unclear"
     assert len(audit_spy.errors) == 1
+
+
+def test_no_case_id_skips_the_audit_write_on_a_provider_failure(monkeypatch, audit_spy):
+    """Standalone script use (no ctx, no real case) must not attempt an audit
+    write that's certain to fail on a null case_id -- skip it instead."""
+    def boom(prompt):
+        raise RuntimeError("network exploded")
+    monkeypatch.setattr(inbound.llm_client, "call", boom)
+
+    result = inbound.parse_reply(text="kal kar dunga", ctx={"now": NOW})  # no case_id
+
+    assert result["intent"] == "unclear"
+    assert audit_spy.errors == []
+    assert audit_spy.records == []
 
 
 def test_no_audio_and_no_text_is_unclear_without_calling_the_provider(monkeypatch):
@@ -401,6 +415,30 @@ def test_reply_received_is_logged_with_transcript_and_intent(monkeypatch, audit_
     assert rec["event_type"] == inbound.audit_log.REPLY_RECEIVED
     assert rec["decision"] == "promise_to_pay"
     assert rec["result"]["transcript"] == "kal kar dunga"
+
+
+def test_no_case_id_skips_the_audit_write_on_success(monkeypatch, audit_spy):
+    mock_text(monkeypatch, reply_json(intent="promise_to_pay", transcript="kal kar dunga", raw_date_phrase="kal", confidence=0.9))
+
+    inbound.parse_reply(text="kal kar dunga", ctx={"now": NOW})  # no case_id
+
+    assert audit_spy.records == []
+
+
+def test_no_case_id_skips_the_audit_write_when_there_is_no_input(monkeypatch, audit_spy):
+    inbound.parse_reply(ctx={"now": NOW})  # no case_id, no audio/text
+    assert audit_spy.records == []
+
+
+def test_case_id_from_the_id_key_still_writes_the_audit_record(monkeypatch, audit_spy):
+    """ctx["id"] is accepted as an alias for ctx["case_id"] -- either way,
+    a real id present means the write happens."""
+    mock_text(monkeypatch, reply_json(intent="promise_to_pay", transcript="kal kar dunga", raw_date_phrase="kal", confidence=0.9))
+
+    inbound.parse_reply(text="kal kar dunga", ctx={"id": "c2", "now": NOW})
+
+    assert len(audit_spy.records) == 1
+    assert audit_spy.records[0]["case_id"] == "c2"
 
 
 # ---------------------------------------------------------------------------

@@ -309,6 +309,11 @@ def _clamp_confidence(value: Any) -> float:
 
 
 def _log(case_id: str | None, actor: str, result: dict, has_audio: bool, reasoning: str) -> None:
+    # No case to attach this to (e.g. a standalone script run with no ctx) --
+    # skip the write rather than attempt one that's certain to fail: the
+    # audit trail is keyed on a real case, not an orphan row.
+    if not case_id:
+        return
     audit_log.record(
         case_id,
         actor,
@@ -318,6 +323,12 @@ def _log(case_id: str | None, actor: str, result: dict, has_audio: bool, reasoni
         reasoning=reasoning,
         result=result,
     )
+
+
+def _log_error(case_id: str | None, actor: str, what: str, exc: Exception) -> None:
+    if not case_id:
+        return
+    audit_log.error(case_id, actor, what, exc)
 
 
 def _empty_result(transcript: str = "") -> dict:
@@ -330,7 +341,10 @@ def parse_reply(audio_bytes: bytes | None = None, text: str | None = None, ctx: 
     Understand one customer reply -- audio, or typed text, never both.
 
     ctx (all optional):
-      case_id     -- for audit attribution
+      case_id     -- for audit attribution. When absent (e.g. a standalone
+                     script run with no real case), the audit write is
+                     skipped entirely rather than attempted with a null
+                     case_id and left to fail.
       mime_type   -- audio MIME type (default "audio/ogg", WhatsApp's format)
       policy      -- for max_promise_horizon_days (default config.DEFAULT_POLICY)
       now         -- injectable clock for deterministic date resolution
@@ -375,7 +389,7 @@ def parse_reply(audio_bytes: bytes | None = None, text: str | None = None, ctx: 
         _debug(ctx, f"EXCEPTION : {type(exc).__name__}: {exc}")
         if finish_reason:
             _debug(ctx, f"finish_reason: {finish_reason}")
-        audit_log.error(case_id, actor, "Voice/text understanding call failed -- running in degraded mode", exc)
+        _log_error(case_id, actor, "Voice/text understanding call failed -- running in degraded mode", exc)
         result = _empty_result()
         why = f"Provider call failed ({exc}); degraded mode, defaulting to unclear so nothing is invented."
         _log(case_id, actor, result, has_audio, why)
