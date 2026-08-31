@@ -14,6 +14,7 @@ agent runs in memory.
 from __future__ import annotations
 
 import sys
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -258,32 +259,52 @@ def clear_batch(batch_id: str) -> None:
     get_client().table("cases").delete().eq("batch_id", batch_id).execute()
 
 
+# Backoff between retries of a chunk that failed on a transient (non
+# duplicate-key) error: 1 initial attempt, then up to 3 retries at these
+# delays -- 4 attempts total before the chunk is given up on.
+_BULK_INSERT_RETRY_DELAYS_S: tuple[float, ...] = (1, 2, 4)
+
+
 def bulk_insert(table: str, rows: list[dict], chunk_size: int = 500) -> int:
     """
     Insert `rows` into `table` in chunks of `chunk_size`, one insert call per
     chunk instead of one per row. Returns the number of rows actually
-    inserted (a chunk that hits a duplicate-key conflict is skipped, not
-    counted).
+    inserted (a chunk that never succeeds — duplicate-key or persistently
+    transient — is skipped, not counted).
 
     This is how app/detection/batch_scanner.py flushes a batch that ran
     against app/db/memory_repository.py: tens of thousands of individual
     round trips become a handful of bulk calls, one (or a few) per table.
 
-    FAILURE POLICY: a duplicate-key conflict on one chunk (e.g. re-flushing a
-    batch whose cases are already in Supabase from a prior run) is logged and
-    skipped so the rest of the flush still lands, rather than losing every
-    later chunk over one bad one. Any other error still raises — a real
-    outage or a malformed row should not be swallowed.
+    FAILURE POLICY:
+      - A duplicate-key conflict on one chunk (e.g. re-flushing a batch whose
+        cases are already in Supabase from a prior run) is never retried —
+        the same key conflicts every time, so retrying would just burn the
+        backoff budget for nothing. It's logged and skipped immediately.
+      - Any other error (a network blip, a timeout, a 5xx) is treated as
+        transient: the chunk is retried up to len(_BULK_INSERT_RETRY_DELAYS_S)
+        times with exponential backoff. If it still hasn't succeeded after
+        that, it's given up on — logged and skipped, same as a duplicate —
+        so one bad chunk doesn't cost the rest of the flush.
+      - Every chunk's outcome is reported to stderr as it resolves, and the
+        whole call reports a final "N/M chunks succeeded, K failed" summary
+        once every chunk has been attempted — a real outage should be loud,
+        even though it's no longer fatal to the flush.
     """
     if not rows:
         return 0
     client = get_client()
     inserted = 0
+    chunks_ok = 0
+    chunks_failed = 0
+    total_chunks = (len(rows) + chunk_size - 1) // chunk_size
+
     for i in range(0, len(rows), chunk_size):
         chunk = rows[i:i + chunk_size]
+        success = False
         try:
             client.table(table).insert(chunk).execute()
-            inserted += len(chunk)
+            success = True
         except Exception as exc:
             text = str(exc).lower()
             if "duplicate" in text or "unique" in text or "23505" in text:
@@ -292,6 +313,35 @@ def bulk_insert(table: str, rows: list[dict], chunk_size: int = 500) -> int:
                     f"{len(chunk)} rows (offset {i}) on a duplicate-key conflict: {exc}",
                     file=sys.stderr,
                 )
+                chunks_failed += 1
                 continue
-            raise
+
+            last_exc = exc
+            for delay in _BULK_INSERT_RETRY_DELAYS_S:
+                time.sleep(delay)
+                try:
+                    client.table(table).insert(chunk).execute()
+                    success = True
+                    break
+                except Exception as retry_exc:
+                    last_exc = retry_exc
+
+            if not success:
+                print(
+                    f"[repository] WARNING bulk_insert into {table!r} gave up on a chunk of "
+                    f"{len(chunk)} rows (offset {i}) after "
+                    f"{1 + len(_BULK_INSERT_RETRY_DELAYS_S)} attempts: {last_exc}",
+                    file=sys.stderr,
+                )
+                chunks_failed += 1
+                continue
+
+        inserted += len(chunk)
+        chunks_ok += 1
+
+    print(
+        f"[repository] bulk_insert into {table!r}: {chunks_ok}/{total_chunks} chunks succeeded, "
+        f"{chunks_failed} failed",
+        file=sys.stderr,
+    )
     return inserted

@@ -93,18 +93,70 @@ def test_bulk_insert_skips_a_duplicate_key_chunk_and_continues(monkeypatch, caps
     assert "cases" in err
 
 
-def test_bulk_insert_reraises_non_duplicate_errors(monkeypatch):
-    client = _FakeClient(fail_on_chunks={0}, error=ConnectionError("network is down"))
-    monkeypatch.setattr(repository, "get_client", lambda: client)
-    rows = [{"id": "1"}]
-
-    with pytest.raises(ConnectionError):
-        repository.bulk_insert("cases", rows)
-
-
 def test_bulk_insert_all_duplicate_error_message_variants_are_caught(monkeypatch):
     for message in ("duplicate key value", "UNIQUE constraint failed", "error 23505"):
         client = _FakeClient(fail_on_chunks={0}, error=Exception(message))
         monkeypatch.setattr(repository, "get_client", lambda: client)
         n = repository.bulk_insert("cases", [{"id": "1"}])
         assert n == 0
+
+
+# ---------------------------------------------------------------------------
+# resilience — a transient (non duplicate-key) error is retried with
+# exponential backoff before a chunk is finally given up on
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def no_real_sleeping(monkeypatch):
+    """None of these tests should actually wait out the backoff delays."""
+    monkeypatch.setattr(repository.time, "sleep", lambda s: None)
+
+
+def test_bulk_insert_retries_a_transient_error_and_succeeds(monkeypatch):
+    # only the very first call (global call index 0) fails; the retry (index 1) succeeds
+    client = _FakeClient(fail_on_chunks={0}, error=ConnectionError("network blip"))
+    monkeypatch.setattr(repository, "get_client", lambda: client)
+
+    n = repository.bulk_insert("cases", [{"id": "1"}])
+
+    assert n == 1
+    assert client.chunk_calls == 2  # initial attempt + 1 successful retry
+
+
+def test_bulk_insert_never_raises_and_gives_up_after_exhausting_retries(monkeypatch, capsys):
+    # every attempt fails: 1 initial + 3 retries = 4 calls, all covered
+    client = _FakeClient(fail_on_chunks={0, 1, 2, 3}, error=ConnectionError("network is down"))
+    monkeypatch.setattr(repository, "get_client", lambda: client)
+    rows = [{"id": "1"}]
+
+    n = repository.bulk_insert("cases", rows)  # must not raise
+
+    assert n == 0
+    assert client.chunk_calls == 4
+    err = capsys.readouterr().err
+    assert "gave up" in err
+    assert "0/1 chunks succeeded, 1 failed" in err
+
+
+def test_bulk_insert_reports_chunks_succeeded_vs_failed_at_the_end(monkeypatch, capsys):
+    client = _FakeClient(fail_on_chunks={0}, error=ConnectionError("timeout"))  # chunk 0 fails, chunk 1 (500 rows in) is untouched by fail_on_chunks
+    monkeypatch.setattr(repository, "get_client", lambda: client)
+    rows = [{"id": str(i)} for i in range(1000)]  # two chunks of 500
+
+    n = repository.bulk_insert("cases", rows, chunk_size=500)
+
+    assert n == 1000  # the first chunk's retry (global call index 1) succeeds, second chunk succeeds outright
+    err = capsys.readouterr().err
+    assert "2/2 chunks succeeded, 0 failed" in err
+
+
+def test_bulk_insert_retry_backoff_sleeps_between_each_retry_only(monkeypatch):
+    sleeps: list[float] = []
+    monkeypatch.setattr(repository.time, "sleep", lambda s: sleeps.append(s))
+    client = _FakeClient(fail_on_chunks={0, 1, 2, 3}, error=ConnectionError("down"))
+    monkeypatch.setattr(repository, "get_client", lambda: client)
+
+    repository.bulk_insert("cases", [{"id": "1"}])
+
+    assert len(sleeps) == 3  # one sleep per retry; none before the very first attempt
+    assert sleeps == sorted(sleeps)  # non-decreasing -- exponential backoff, not constant or shrinking

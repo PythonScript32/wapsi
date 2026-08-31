@@ -54,6 +54,7 @@ class FakeRepository:
         self.last_contact_at: dict[str, str] = {}
         self.has_active_promise: dict[str, bool] = {}
         self.pre_debit_notice_at: dict[str, str] = {}
+        self.audit_log: list[dict] = []
 
     def clear_batch(self, batch_id):
         self.cases = {cid: c for cid, c in self.cases.items() if c.get("batch_id") != batch_id}
@@ -127,6 +128,21 @@ class FakeRepository:
         p["status"] = status
         self.has_active_promise[p["case_id"]] = False
 
+    def attempts_for_case(self, case_id):
+        return [row for row in self.attempts_by_key.values() if row.get("case_id") == case_id]
+
+    def outreach_for_case(self, case_id):
+        return [row for row in self.outreach if row.get("case_id") == case_id]
+
+    def all_promises(self, batch_id=None):
+        return list(self.promises.values())
+
+    def append_audit(self, row):
+        self.audit_log.append(dict(row))
+
+    def audit_for_case(self, case_id):
+        return [row for row in self.audit_log if row.get("case_id") == case_id]
+
 
 @pytest.fixture
 def fake_repo(monkeypatch):
@@ -135,6 +151,7 @@ def fake_repo(monkeypatch):
         "clear_batch", "insert_case", "gate_context", "insert_attempt", "get_attempt_by_key",
         "update_attempt", "insert_outreach", "increment_attempts", "update_case", "mark_recovered",
         "insert_promise", "due_promises", "resolve_promise",
+        "attempts_for_case", "outreach_for_case", "all_promises", "append_audit", "audit_for_case",
     ):
         monkeypatch.setattr(repository_module, name, getattr(repo, name))
     return repo
@@ -889,6 +906,128 @@ def test_default_horizon_days_is_30():
     import inspect
     sig = inspect.signature(bs.run_batch)
     assert sig.parameters["horizon_days"].default == 30
+
+
+# ---------------------------------------------------------------------------
+# --clear: a re-run must not silently skip the flush on a duplicate key from
+# a prior run of the same batch_id
+# ---------------------------------------------------------------------------
+
+def test_clear_defaults_to_true():
+    import inspect
+    sig = inspect.signature(bs.run_batch)
+    assert sig.parameters["clear"].default is True
+
+
+def test_clear_true_wipes_a_stale_row_left_by_a_prior_run(monkeypatch, fake_repo):
+    fake_repo.cases["stale_case"] = {"id": "stale_case", "batch_id": "dev", "state": "DETECTED"}
+    case = mandate_revoked_case(id="case_clear1")
+    monkeypatch.setattr(bs, "_load_dataset", lambda set_name: [case])
+
+    bs.run_batch("dev", horizon_days=1, live=False, now=NOW, persist="supabase")  # clear omitted -> True
+
+    assert "stale_case" not in fake_repo.cases
+    assert "case_clear1" in fake_repo.cases
+
+
+def test_clear_false_leaves_a_prior_run_batch_id_row_in_place(monkeypatch, fake_repo):
+    fake_repo.cases["stale_case"] = {"id": "stale_case", "batch_id": "dev", "state": "DETECTED"}
+    case = mandate_revoked_case(id="case_clear2")
+    monkeypatch.setattr(bs, "_load_dataset", lambda set_name: [case])
+
+    bs.run_batch("dev", horizon_days=1, live=False, now=NOW, persist="supabase", clear=False)
+
+    assert "stale_case" in fake_repo.cases
+    assert "case_clear2" in fake_repo.cases
+
+
+# ---------------------------------------------------------------------------
+# run_batch wires the gathered attempts/outreach/promises/audit rows into
+# metrics.compute() -- the new Sec 4.2-4.4 keys must actually be populated,
+# not just present-but-empty because nothing was ever passed through.
+# ---------------------------------------------------------------------------
+
+def test_run_batch_result_includes_the_new_metric_groups(monkeypatch, fake_repo):
+    """Restores REAL audit logging (overriding the autouse no_audit_writes
+    fixture) so actions_without_audit is checked against real ACTED /
+    OUTREACH_SENT rows -- with audit disabled (as most tests in this file
+    run), that invariant would correctly report a mismatch, since no audit
+    row is ever written at all."""
+    monkeypatch.setattr(audit_log_module, "record", _REAL_AUDIT_RECORD)
+    monkeypatch.setattr(audit_log_module, "gate", _REAL_AUDIT_GATE)
+    monkeypatch.setattr(audit_log_module, "error", _REAL_AUDIT_ERROR)
+    monkeypatch.setattr(audit_log_module, "money_action", _REAL_AUDIT_MONEY_ACTION)
+
+    case = make_case(id="case_metrics1")
+    monkeypatch.setattr(bs, "_load_dataset", lambda set_name: [case])
+
+    result = bs.run_batch("dev", horizon_days=3, live=False, now=NOW, persist="supabase")
+
+    for key in (
+        "kept_promise_rate", "false_escalation_rate", "avg_time_to_recovery_days",
+        "interventions_per_recovery", "cost_per_recovered_rupee", "contact_efficiency",
+        "double_charge_incidents", "post_opt_out_contacts", "actions_without_audit",
+        "over_cap_discounts", "worst_three_reasons",
+    ):
+        assert key in result
+    # a fresh dev batch's own repository dedup must keep every safety
+    # invariant at 0 -- this is the same real-dataset credibility check as
+    # test_no_case_finishes_the_real_dev_batch_in_a_non_terminal_state.
+    for key in (
+        "double_charge_incidents", "post_opt_out_contacts",
+        "actions_without_audit", "over_cap_discounts",
+    ):
+        assert result[key] == 0
+
+
+# ---------------------------------------------------------------------------
+# _fmt_ratio -- a small-but-real ratio (e.g. cost_per_recovered_rupee, often
+# a few thousandths of a rupee) must not silently print as "0.00"
+# ---------------------------------------------------------------------------
+
+def test_fmt_ratio_default_precision_matches_prior_behaviour():
+    assert bs._fmt_ratio(3.14159) == "3.14"
+
+
+def test_fmt_ratio_higher_precision_shows_a_small_nonzero_value():
+    assert bs._fmt_ratio(0.0017595240291486025, decimals=4) == "0.0018"
+
+
+def test_fmt_ratio_none_is_reported_as_not_available():
+    assert bs._fmt_ratio(None, decimals=4) == "n/a"
+
+
+def test_print_summary_cost_per_recovered_rupee_is_not_flattened_to_zero(capsys):
+    bs._print_summary("dev", {
+        "total_cases": 1, "recovered_count": 1, "recovery_rate_count": 1.0,
+        "recovered_value": 100.0, "at_risk_value": 100.0, "recovery_rate_value": 1.0,
+        "exception_list": [], "gate_block_counts": {},
+        "cost_per_recovered_rupee": 0.0017595240291486025,
+    })
+    out = capsys.readouterr().out
+    assert "cost per recovered Rs   : 0.0018\n" in out
+    assert "cost per recovered Rs   : 0.00\n" not in out
+
+
+def test_safety_invariants_hold_on_the_real_dev_dataset(monkeypatch):
+    """The credibility check for the whole metrics extension: run the real
+    100-case dev set end to end and prove every governance/safety invariant
+    is actually 0 on real pipeline output, not just on hand-crafted data.
+    Restores REAL audit logging (see test_run_batch_result_includes_the_new_
+    metric_groups above) -- actions_without_audit is meaningless with audit
+    writes disabled."""
+    monkeypatch.setattr(audit_log_module, "record", _REAL_AUDIT_RECORD)
+    monkeypatch.setattr(audit_log_module, "gate", _REAL_AUDIT_GATE)
+    monkeypatch.setattr(audit_log_module, "error", _REAL_AUDIT_ERROR)
+    monkeypatch.setattr(audit_log_module, "money_action", _REAL_AUDIT_MONEY_ACTION)
+    monkeypatch.setattr(repository_module, "bulk_insert", lambda *a, **k: 0)
+
+    result = bs.run_batch("dev", persist="memory")  # default horizon_days=30
+
+    assert result["double_charge_incidents"] == 0
+    assert result["post_opt_out_contacts"] == 0
+    assert result["actions_without_audit"] == 0
+    assert result["over_cap_discounts"] == 0
 
 
 def test_end_of_horizon_sweep_closes_a_still_active_case(monkeypatch, fake_repo):

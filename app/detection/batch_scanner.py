@@ -154,6 +154,30 @@ def _strip_generated_ids(table: str, rows: list[dict]) -> list[dict]:
     return [{k: v for k, v in row.items() if k != "id"} for row in rows]
 
 
+def _gather_batch_records(batch_id: str, case_ids: list[str]) -> dict[str, list[dict]]:
+    """
+    Collect every payment_attempts/outreach/audit_log row for this batch's
+    cases, plus its promises, so app/metrics/compute.py can compute the
+    operational metrics and safety invariants (Sec 4.2-4.4) without ever
+    touching case["latent"] itself.
+
+    Called through repository.* rather than a backend-specific dump, so the
+    same code path works for both persist="memory" (repository.* is bound to
+    the swapped-in MemoryRepository) and persist="supabase" (repository.* is
+    the real module, hitting Supabase directly) -- see the caller's note on
+    why this must run before the persist="memory" swap is undone.
+    """
+    attempts: list[dict] = []
+    outreach: list[dict] = []
+    audit: list[dict] = []
+    for case_id in case_ids:
+        attempts.extend(repository.attempts_for_case(case_id))
+        outreach.extend(repository.outreach_for_case(case_id))
+        audit.extend(repository.audit_for_case(case_id))
+    promises = repository.all_promises(batch_id)
+    return {"attempts": attempts, "outreach": outreach, "promises": promises, "audit": audit}
+
+
 def _flush_to_supabase(backend: MemoryRepository) -> None:
     """
     Bulk-write a finished memory run to Supabase: one insert per table with
@@ -185,6 +209,7 @@ def run_batch(
     persist: str = "memory",
     limit: int | None = None,
     now: datetime | None = None,
+    clear: bool = True,
 ) -> dict:
     """
     horizon_days=30: long enough for the slowest realistic path to actually
@@ -208,13 +233,18 @@ def run_batch(
     real wall clock, so timing-sensitive scenarios (salary-day guesses,
     pre-debit notice aging) are deterministic. Production and the CLI never
     pass it.
+    clear=True (default): wipe this batch_id's existing rows
+    (repository.clear_batch) before ingesting, so a re-run never silently
+    skips the flush on a duplicate idempotency/primary key from the prior
+    run. Pass False only to deliberately append onto an existing batch.
     """
     policy = config.DEFAULT_POLICY
     batch_id = set_name
     started_at = time.perf_counter()
 
     with _repository_backend(persist) as backend:
-        repository.clear_batch(batch_id)
+        if clear:
+            repository.clear_batch(batch_id)
         raw_cases = _load_dataset(set_name)
         if limit is not None:
             raw_cases = raw_cases[:limit]
@@ -265,13 +295,24 @@ def run_batch(
         if swept:
             print(f"  swept {swept:>4} unresolved cases -> CLOSED_LOST at end of horizon")
 
+        # Gathered here, while persist="memory" still has repository.* bound
+        # to the swapped-in MemoryRepository — outside this block those
+        # functions are restored to the real ones, which would silently
+        # start reading an empty (or unrelated) backend instead.
+        batch_records = _gather_batch_records(batch_id, list(cases.keys()))
+
     if backend is not None:
         _flush_to_supabase(backend)
 
     naive = naive_baseline(set_name)
     ceiling = _compute_ceiling(list(cases.values()))
     clean_cases = [{k: v for k, v in c.items() if k != "latent"} for c in cases.values()]
-    result = metrics.compute(clean_cases, naive=naive, ceiling=ceiling, gate_block_counts=dict(gate_block_counts))
+    result = metrics.compute(
+        clean_cases, naive=naive, ceiling=ceiling, gate_block_counts=dict(gate_block_counts),
+        attempts=batch_records["attempts"], outreach=batch_records["outreach"],
+        promises=batch_records["promises"], audit_rows=batch_records["audit"],
+        policy=policy,
+    )
 
     os.makedirs("data", exist_ok=True)
     out_path = f"data/results_{set_name}.json"
@@ -704,20 +745,55 @@ def _naive_recovers(case: dict) -> bool:
 # CLI
 # ---------------------------------------------------------------------------
 
+def _fmt_pct(value: float | None) -> str:
+    return f"{value * 100:.1f}%" if value is not None else "n/a"
+
+
+def _fmt_ratio(value: float | None, unit: str = "", decimals: int = 2) -> str:
+    return f"{value:.{decimals}f}{unit}" if value is not None else "n/a"
+
+
+def _fmt_invariant(value: int) -> str:
+    return "PASS" if value == 0 else f"FAIL ({value})"
+
+
 def _print_summary(set_name: str, m: dict) -> None:
     print(f"\n=== Wapsi batch: {set_name} ===")
+
+    print("\n-- PRIMARY --")
     print(f"  cases              : {m['total_cases']}")
-    print(f"  recovered          : {m['recovered_count']} ({m['recovery_rate_count'] * 100:.1f}%)")
+    print(f"  recovered          : {m['recovered_count']} ({_fmt_pct(m['recovery_rate_count'])})")
     print(
         f"  Rs recovered       : {m['recovered_value']:,.0f} / {m['at_risk_value']:,.0f} "
-        f"({m['recovery_rate_value'] * 100:.1f}%)"
+        f"({_fmt_pct(m['recovery_rate_value'])})"
     )
-    if m.get("recovery_lift") is not None:
-        print(f"  lift vs naive      : {m['recovery_lift'] * 100:+.1f}%")
-    if m.get("ceiling_capture") is not None:
-        print(f"  ceiling capture    : {m['ceiling_capture'] * 100:.1f}%")
-    print(f"  gate blocks        : {m.get('gate_block_counts') or {}}")
-    print(f"  unrecovered        : {len(m.get('exception_list') or [])}")
+    print(f"  lift vs naive      : {_fmt_pct(m.get('recovery_lift'))}")
+    print(f"  ceiling capture    : {_fmt_pct(m.get('ceiling_capture'))}")
+
+    print("\n-- OPERATIONAL --")
+    print(f"  kept-promise rate       : {_fmt_pct(m.get('kept_promise_rate'))}")
+    print(f"  false-escalation rate   : {_fmt_pct(m.get('false_escalation_rate'))}")
+    print(f"  avg time to recovery    : {_fmt_ratio(m.get('avg_time_to_recovery_days'), ' days')}")
+    print(f"  interventions/recovery  : {_fmt_ratio(m.get('interventions_per_recovery'))}")
+    print(f"  cost per recovered Rs   : {_fmt_ratio(m.get('cost_per_recovered_rupee'), decimals=4)}")
+    print(f"  contact efficiency      : {_fmt_ratio(m.get('contact_efficiency'))}")
+    print(f"  gate blocks             : {m.get('gate_block_counts') or {}}")
+
+    print("\n-- SAFETY INVARIANTS (must all be 0) --")
+    print(f"  double-charge incidents : {_fmt_invariant(m.get('double_charge_incidents', 0))}")
+    print(f"  post-opt-out contacts   : {_fmt_invariant(m.get('post_opt_out_contacts', 0))}")
+    print(f"  actions without audit   : {_fmt_invariant(m.get('actions_without_audit', 0))}")
+    print(f"  over-cap discounts      : {_fmt_invariant(m.get('over_cap_discounts', 0))}")
+
+    print("\n-- EXCEPTIONS --")
+    print(f"  unrecovered             : {len(m.get('exception_list') or [])}")
+    for row in m.get("worst_three_reasons") or []:
+        print(
+            f"    worst: {row['reason_category']:<20} rate={_fmt_pct(row['recovery_rate']):>6}  "
+            f"count={row['count']:>4}  Rs lost={row['rupees_lost']:,.0f}  "
+            f"dominant={row['dominant_failure_mode']}"
+        )
+
     print(f"\n  -> {m.get('_snapshot_path', f'data/results_{set_name}.json')}\n")
 
 
@@ -732,11 +808,16 @@ def main() -> None:
         help="'memory' (default) runs at Python speed and bulk-flushes to Supabase at the end; "
              "'supabase' hits the real database on every call",
     )
+    ap.add_argument(
+        "--clear", action=argparse.BooleanOptionalAction, default=True,
+        help="clear this batch_id's existing rows before ingesting (default: true); "
+             "use --no-clear to append onto an existing batch instead",
+    )
     args = ap.parse_args()
 
     result = run_batch(
         set_name=args.set_name, horizon_days=args.horizon_days, live=args.live,
-        persist=args.persist, limit=args.limit,
+        persist=args.persist, limit=args.limit, clear=args.clear,
     )
     _print_summary(args.set_name, result)
 
