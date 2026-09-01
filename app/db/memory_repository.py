@@ -239,6 +239,11 @@ class MemoryRepository:
         if row is not None:
             row.update({"status": status, "resolved_at": datetime.now(timezone.utc).isoformat()})
 
+    def promises_for_case(self, case_id: str) -> list[dict]:
+        rows = [r for r in self._promises.values() if r.get("case_id") == case_id]
+        rows.sort(key=lambda r: r.get("created_at") or "")
+        return [dict(r) for r in rows]
+
     def all_promises(self, batch_id: str | None = None) -> list[dict]:
         """For the kept-promise-rate metric."""
         if batch_id is None:

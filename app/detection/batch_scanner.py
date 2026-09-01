@@ -52,6 +52,7 @@ from app.decision import engine
 from app.diagnosis import classifier
 from app.execution import actions
 from app.metrics import compute as metrics
+from app.promises import tracker
 
 _ACTOR = "detection.batch_scanner"
 _TERMINAL_STATES = {"RECOVERED", "CLOSED_LOST", "ESCALATED"}
@@ -67,8 +68,8 @@ _REPOSITORY_FUNCTIONS = (
     "mark_recovered", "increment_attempts", "insert_attempt", "get_attempt_by_key",
     "attempts_for_case", "update_attempt", "insert_outreach", "last_outreach_at",
     "outreach_for_case", "record_reply", "insert_promise", "active_promise", "due_promises",
-    "resolve_promise", "all_promises", "append_audit", "audit_for_case", "audit_by_event",
-    "gate_context",
+    "resolve_promise", "all_promises", "promises_for_case", "append_audit", "audit_for_case",
+    "audit_by_event", "gate_context",
 )
 
 
@@ -499,33 +500,32 @@ def _tally_gate(result: dict, gate_block_counts: Counter) -> None:
 # ---------------------------------------------------------------------------
 
 def _resolve_due_promises(cases: dict[str, dict], clock: SimulatedClock) -> None:
-    due = repository.due_promises(clock.now.date().isoformat())
-    for promise in due:
-        case_id = promise.get("case_id")
-        case = cases.get(case_id)
+    """
+    Delegates the actual promise lifecycle to tracker.resolve_due_promises.
+    This wrapper's only two jobs: (a) supply the paid/not-paid verdict from
+    case["latent"]["keeps_promise"] -- the one piece of ground truth
+    tracker.py must never read itself, since only this module may -- and (b)
+    mirror the result back onto this loop's own in-memory `cases` dict, same
+    as every other per-day step here does (repository writes and this dict
+    are separate copies; see MemoryRepository's module docstring).
+    """
+    def is_paid(promise: dict) -> bool:
+        case = cases.get(promise.get("case_id"))
+        latent = (case or {}).get("latent") or {}
+        return bool(latent.get("keeps_promise"))
+
+    results = tracker.resolve_due_promises(
+        clock.now.date().isoformat(), config.DEFAULT_POLICY, is_paid=is_paid, now=clock.now,
+    )
+    for result in results:
+        case = cases.get(result["case_id"])
         if case is None:
             continue
-        latent = case.get("latent") or {}
-        kept = bool(latent.get("keeps_promise"))
-
-        if kept:
+        case["state"] = result["case_state"]
+        if result["status"] == "kept":
             amount = float(case.get("amount") or 0)
-            repository.resolve_promise(promise["id"], "kept")
-            repository.mark_recovered(case_id, amount)
-            case["state"] = "RECOVERED"
             case["recovered_amount"] = amount
             case["recovered_at"] = clock.now.isoformat()
-            audit_log.record(case_id, _ACTOR, audit_log.PROMISE_KEPT, reasoning="Customer paid as promised.")
-            audit_log.record(case_id, _ACTOR, audit_log.RECOVERED, reasoning="Promise kept; case recovered.")
-        else:
-            repository.resolve_promise(promise["id"], "broken")
-            audit_log.record(case_id, _ACTOR, audit_log.PROMISE_BROKEN, reasoning="Promised date passed with no payment.")
-            repository.update_case(case_id, state="ESCALATED")
-            case["state"] = "ESCALATED"
-            audit_log.record(
-                case_id, _ACTOR, audit_log.ESCALATED,
-                reasoning="Broken promise. Escalating rather than chasing indefinitely.",
-            )
 
 
 # ---------------------------------------------------------------------------
@@ -630,22 +630,15 @@ def _maybe_route_reply(case: dict, decision: dict, latent: dict, now: datetime) 
         return True
 
     if intent == "promise_to_pay":
+        # tracker.record_promise applies the horizon cap itself (FR-D5); pass
+        # the uncapped offset and let it be the one place that decision is made.
         offset = int(latent.get("promise_offset_days") or 0)
-        cap = int(config.DEFAULT_POLICY.get("max_promise_horizon_days", 14))
-        promised_date = now.date() + timedelta(days=min(offset, cap))
-        repository.insert_promise({
-            "case_id": case_id,
-            "promised_amount": float(case.get("amount") or 0),
-            "promised_date": promised_date.isoformat(),
-            "status": "pending",
-        })
-        repository.update_case(case_id, state="PROMISE_MADE")
-        case["state"] = "PROMISE_MADE"
-        audit_log.record(
-            case_id, _ACTOR, audit_log.PROMISE_MADE,
-            decision="promise_to_pay",
-            reasoning=f"Customer promised to pay by {promised_date.isoformat()}.",
+        promised_date = now.date() + timedelta(days=offset)
+        result = tracker.record_promise(
+            case_id, float(case.get("amount") or 0), promised_date,
+            source="inferred", policy=config.DEFAULT_POLICY, now=now,
         )
+        case["state"] = "PROMISE_MADE" if result["created"] else "ESCALATED"
         return False
 
     return None  # 'unclear' or anything else — no override

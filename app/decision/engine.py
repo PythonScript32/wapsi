@@ -17,6 +17,11 @@ Returns a Decision:
 TIMING INTELLIGENCE (the thing that beats a naive retry):
   insufficient_funds -> wait for the customer's salary day (1st / month-end
                         cluster), then retry. Retrying immediately mostly fails.
+                        If that salary-cluster date would fall outside the
+                        case's grace period (a schedule the gate's G5 is
+                        certain to reject once it comes due), propose a
+                        self-serve payment link instead — see
+                        _decide_insufficient_funds_link_fallback.
   bank_downtime      -> short exponential backoff (hours), retry soon.
   mandate_revoked    -> NEVER silently retry; request re-mandate.
   expired_card       -> request card update; payment link as fallback.
@@ -158,6 +163,22 @@ def _personalize(message: str) -> str:
 
 def _decide_insufficient_funds(case: dict, attempt_no: int, now: datetime, policy: dict) -> dict:
     salary_dt = _next_salary_day(now)
+
+    # The salary-day guess can land anywhere from 1 to ~29 days out (it's
+    # pinned to the 1st/month-end calendar cluster, not to `now`). Scheduling
+    # a mandate retry for a date the gate's own grace-period check (G5) is
+    # certain to reject once the clock gets there is a proposal this engine
+    # can see is dead on arrival — it just has to check the same math the
+    # gate will later apply. Falling back to a self-serve link keeps the case
+    # working within the window we're actually still allowed to pursue it,
+    # instead of parking it on a schedule that silently depends on what day
+    # of the month `now` happens to be.
+    created = _parse_ts(case.get("created_at"))
+    if created is not None:
+        grace_days = int(policy.get("grace_period_days", 14))
+        if (salary_dt - created).days > grace_days:
+            return _decide_insufficient_funds_link_fallback(case, attempt_no, salary_dt, created, grace_days, policy)
+
     name, amount, date_str = _customer_name(case), _fmt_amount(case.get("amount")), _fmt_date(salary_dt)
     return {
         "intervention": "retry_after_date",
@@ -175,6 +196,33 @@ def _decide_insufficient_funds(case: dict, attempt_no: int, now: datetime, polic
             f"fail again, so scheduling for {date_str}, the next likely salary-cluster date "
             "(1st or month-end). This is a heuristic guess, not the customer's actual salary "
             "day, which the pipeline never sees."
+        ),
+    }
+
+
+def _decide_insufficient_funds_link_fallback(
+    case: dict, attempt_no: int, salary_dt: datetime, created: datetime, grace_days: int, policy: dict,
+) -> dict:
+    name, amount = _customer_name(case), _fmt_amount(case.get("amount"))
+    return {
+        "intervention": "send_link",
+        "scheduled_for": None,
+        "channel": _default_channel(policy),
+        "message": (
+            f"Namaste {name}, aapka Rs {amount} ka payment abhi fail ho gaya, account mein "
+            "balance kam tha. Yeh raha ek seedha payment link, jab bhi balance ho tab pay kar "
+            "dein, koi wait karne ki zaroorat nahi."
+        ),
+        "discount_pct": 0.0,
+        "is_mandate_debit": False,
+        "reasoning": (
+            f"Insufficient funds on attempt {attempt_no}. The next likely salary-cluster date "
+            f"({_fmt_date(salary_dt)}) is {(salary_dt - created).days} days after the case was "
+            f"created, past the {grace_days}-day grace period — scheduling a mandate retry for "
+            "it would only sit there and get blocked by the gate once it finally came due. "
+            "Sending a self-serve payment link now instead, so the customer can pay whenever "
+            "they actually have the funds, within the window we're still allowed to pursue "
+            "this case."
         ),
     }
 

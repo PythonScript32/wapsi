@@ -39,6 +39,7 @@ from app import config
 from app.audit import log as audit_log
 from app.decision import engine as decision_engine
 from app.llm import client as llm_client
+from app.promises import tracker
 
 INTENTS = ("promise_to_pay", "already_paid", "opt_out", "pay_now", "dispute", "unclear")
 
@@ -348,6 +349,11 @@ def parse_reply(audio_bytes: bytes | None = None, text: str | None = None, ctx: 
       mime_type   -- audio MIME type (default "audio/ogg", WhatsApp's format)
       policy      -- for max_promise_horizon_days (default config.DEFAULT_POLICY)
       now         -- injectable clock for deterministic date resolution
+      amount      -- the case's at-risk amount. Required (alongside case_id)
+                     for a promise_to_pay reply to actually create a tracked
+                     promise via app.promises.tracker.record_promise -- with
+                     no amount there's nothing to promise against, so the
+                     write is skipped (same fail-soft precedent as case_id).
       debug       -- print provider, raw reply/exception, finish_reason, and
                      the downgrade reasoning to stderr as they happen. Off by
                      default; scripts/test_voice.py turns it on so a degraded
@@ -461,4 +467,31 @@ def parse_reply(audio_bytes: bytes | None = None, text: str | None = None, ctx: 
     reasoning = " ".join(reasoning_parts)
     _log(case_id, actor, result, has_audio, reasoning)
     _debug(ctx, reasoning)
+
+    if intent == "promise_to_pay" and promised_date:
+        _record_promise(case_id, ctx.get("amount"), promised_date, policy, now, actor, ctx)
+
     return result
+
+
+def _record_promise(
+    case_id: str | None, amount: Any, promised_date: str, policy: dict, now: datetime, actor: str, ctx: dict,
+) -> None:
+    """Closes the loop: a resolved promise_to_pay reply becomes a tracked
+    promise (app.promises.tracker.record_promise), which is what actually
+    schedules the retry and moves the case to PROMISE_MADE. Skipped, not
+    attempted-and-failed, when there's no case to attach it to or no amount
+    to promise against -- same fail-soft precedent as the case_id-less audit
+    skip. Any other failure (e.g. a DB outage) is caught and logged as
+    degraded mode -- a reply that was understood correctly must never crash
+    the pipeline just because the tracker write didn't land."""
+    if not case_id or amount is None:
+        _debug(ctx, "promise_to_pay resolved but no case_id/amount in ctx -- skipping record_promise")
+        return
+    try:
+        tracker.record_promise(
+            case_id, float(amount), promised_date, source="voice", policy=policy, now=now,
+        )
+    except Exception as exc:
+        _debug(ctx, f"record_promise failed: {type(exc).__name__}: {exc}")
+        _log_error(case_id, actor, "Failed to record the tracked promise after a promise_to_pay reply", exc)

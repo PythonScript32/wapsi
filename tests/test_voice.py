@@ -508,3 +508,84 @@ def test_debug_prints_why_a_low_confidence_reply_was_downgraded(monkeypatch, cap
 ])
 def test_mime_type_for_path(path, expected):
     assert inbound.mime_type_for_path(path) == expected
+
+
+# ---------------------------------------------------------------------------
+# Promise tracker wiring -- a resolved promise_to_pay reply must actually
+# create a tracked promise (app.promises.tracker.record_promise), source
+# "voice". tracker.record_promise itself is covered end-to-end in
+# tests/test_promises.py; these tests only check that inbound.py calls it
+# correctly and degrades safely when it can't.
+# ---------------------------------------------------------------------------
+
+def test_promise_to_pay_calls_record_promise_with_source_voice(monkeypatch):
+    mock_text(monkeypatch, reply_json(intent="promise_to_pay", transcript="kal kar dunga", raw_date_phrase="kal", confidence=0.9))
+    calls = []
+    monkeypatch.setattr(
+        inbound.tracker, "record_promise",
+        lambda case_id, amount, promised_date, **kw: calls.append((case_id, amount, promised_date, kw)),
+    )
+
+    inbound.parse_reply(text="kal kar dunga", ctx={"case_id": "c1", "amount": 499.0, "now": NOW})
+
+    assert len(calls) == 1
+    case_id, amount, promised_date, kw = calls[0]
+    assert case_id == "c1"
+    assert amount == 499.0
+    assert promised_date == (NOW.date() + timedelta(days=1)).isoformat()  # "kal" = tomorrow
+    assert kw["source"] == "voice"
+
+
+def test_promise_to_pay_skips_record_promise_with_no_case_id(monkeypatch):
+    mock_text(monkeypatch, reply_json(intent="promise_to_pay", transcript="kal kar dunga", raw_date_phrase="kal", confidence=0.9))
+    calls = []
+    monkeypatch.setattr(inbound.tracker, "record_promise", lambda *a, **k: calls.append(1))
+
+    inbound.parse_reply(text="kal kar dunga", ctx={"amount": 499.0, "now": NOW})  # no case_id
+
+    assert calls == []
+
+
+def test_promise_to_pay_skips_record_promise_with_no_amount(monkeypatch):
+    mock_text(monkeypatch, reply_json(intent="promise_to_pay", transcript="kal kar dunga", raw_date_phrase="kal", confidence=0.9))
+    calls = []
+    monkeypatch.setattr(inbound.tracker, "record_promise", lambda *a, **k: calls.append(1))
+
+    inbound.parse_reply(text="kal kar dunga", ctx={"case_id": "c1", "now": NOW})  # no amount
+
+    assert calls == []
+
+
+def test_non_promise_intent_never_calls_record_promise(monkeypatch):
+    mock_text(monkeypatch, reply_json(intent="already_paid", transcript="maine already pay kar diya hai", raw_date_phrase=None, confidence=0.9))
+    calls = []
+    monkeypatch.setattr(inbound.tracker, "record_promise", lambda *a, **k: calls.append(1))
+
+    inbound.parse_reply(text="maine already pay kar diya hai", ctx={"case_id": "c1", "amount": 499.0, "now": NOW})
+
+    assert calls == []
+
+
+def test_unresolvable_date_phrase_never_calls_record_promise(monkeypatch):
+    """Downgraded to 'unclear' -- never invent a promise, never track one either."""
+    mock_text(monkeypatch, reply_json(intent="promise_to_pay", transcript="jaldi kar dunga", raw_date_phrase="jaldi", confidence=0.9))
+    calls = []
+    monkeypatch.setattr(inbound.tracker, "record_promise", lambda *a, **k: calls.append(1))
+
+    result = inbound.parse_reply(text="jaldi kar dunga", ctx={"case_id": "c1", "amount": 499.0, "now": NOW})
+
+    assert result["intent"] == "unclear"
+    assert calls == []
+
+
+def test_record_promise_failure_is_caught_and_logged_not_raised(monkeypatch, audit_spy):
+    mock_text(monkeypatch, reply_json(intent="promise_to_pay", transcript="kal kar dunga", raw_date_phrase="kal", confidence=0.9))
+
+    def boom(*a, **k):
+        raise RuntimeError("db unavailable")
+    monkeypatch.setattr(inbound.tracker, "record_promise", boom)
+
+    result = inbound.parse_reply(text="kal kar dunga", ctx={"case_id": "c1", "amount": 499.0, "now": NOW})
+
+    assert result["intent"] == "promise_to_pay"  # the reply was still understood correctly
+    assert any(e["what"].startswith("Failed to record the tracked promise") for e in audit_spy.errors)

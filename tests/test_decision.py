@@ -51,8 +51,12 @@ def scheduled_dt(result: dict) -> datetime:
 
 @pytest.mark.parametrize("hour", [0, 6, 9, 12, 18, 23])
 def test_insufficient_funds_never_scheduled_today(hour):
-    now = NOW.replace(hour=hour)
-    result = decide(make_case(), [], DEFAULT_POLICY, now=now)
+    # created_at pinned close enough to the guessed salary day (month-end)
+    # to stay inside the grace period — otherwise the engine takes the
+    # link-fallback path instead of scheduling a retry at all.
+    now = datetime(2026, 9, 20, hour, 0, tzinfo=timezone.utc)
+    case = make_case(created_at=(now - timedelta(days=1)).isoformat())
+    result = decide(case, [], DEFAULT_POLICY, now=now)
     assert result["intervention"] == "retry_after_date"
     assert scheduled_dt(result).date() > now.date()
 
@@ -77,7 +81,9 @@ def test_insufficient_funds_on_month_end_rolls_to_next_month():
 
 
 def test_insufficient_funds_is_mandate_debit():
-    result = decide(make_case(), [], DEFAULT_POLICY, now=NOW)
+    now = datetime(2026, 9, 20, 12, 0, tzinfo=timezone.utc)  # salary day stays inside grace
+    case = make_case(created_at=(now - timedelta(days=1)).isoformat())
+    result = decide(case, [], DEFAULT_POLICY, now=now)
     assert result["is_mandate_debit"] is True
 
 
@@ -217,22 +223,45 @@ def test_attempt_cap_is_not_checked_by_the_engine():
     assert result["intervention"] == "retry_after_date"
 
 
-def test_grace_period_is_not_checked_by_the_engine():
+def test_insufficient_funds_falls_back_to_a_link_when_the_case_is_already_past_grace():
     case = make_case(created_at=(NOW - timedelta(days=20)).isoformat())  # cap is 14 days
     result = decide(case, [], DEFAULT_POLICY, now=NOW)
-    assert result["intervention"] == "retry_after_date"
+    assert result["intervention"] == "send_link"
+    assert result["scheduled_for"] is None
+    assert result["is_mandate_debit"] is False
 
 
-def test_scheduled_for_is_not_clamped_to_grace_period():
-    """A case created 13 days ago with a 14-day grace period leaves only 1 day
-    of runway, but the engine proposes the honest salary-day guess anyway —
-    however far out it lands. It's the gate's job (G5) to block the eventual
-    attempt once the case is actually past grace, not the engine's job to
-    quietly pull the schedule back inside a window it isn't checking."""
+def test_insufficient_funds_falls_back_to_a_link_when_the_salary_guess_would_land_past_grace():
+    """A case created 13 days ago (1 day of grace runway left, so not YET
+    past grace) still gets the link fallback: NOW is mid-month, so the
+    guessed salary day (next month-end) lands weeks past the grace deadline.
+    Scheduling a mandate retry for a date the gate is certain to reject once
+    it comes due would just be a slower way to reach the same dead end — the
+    engine checks the SCHEDULE's distance from creation, not just whether the
+    case itself has expired yet."""
     case = make_case(created_at=(NOW - timedelta(days=13)).isoformat())
     result = decide(case, [], DEFAULT_POLICY, now=NOW)
-    deadline = NOW - timedelta(days=13) + timedelta(days=DEFAULT_POLICY["grace_period_days"])
-    assert scheduled_dt(result) > deadline
+    assert result["intervention"] == "send_link"
+    assert result["scheduled_for"] is None
+    assert result["is_mandate_debit"] is False
+
+
+def test_insufficient_funds_link_fallback_reasoning_names_the_grace_period():
+    case = make_case(created_at=(NOW - timedelta(days=20)).isoformat())
+    result = decide(case, [], DEFAULT_POLICY, now=NOW)
+    assert "grace" in result["reasoning"].lower()
+
+
+def test_insufficient_funds_schedules_normally_when_salary_guess_fits_inside_grace():
+    """The counterpart to the two fallback tests above: when the guessed
+    salary day DOES land inside the grace window, the engine still proposes
+    the normal mandate-debit retry — the fallback is a bounded exception,
+    not a wholesale replacement of the timing-intelligence path."""
+    now = datetime(2026, 9, 20, 8, 0, tzinfo=timezone.utc)  # month-end is 10 days out
+    case = make_case(created_at=(now - timedelta(days=1)).isoformat())
+    result = decide(case, [], DEFAULT_POLICY, now=now)
+    assert result["intervention"] == "retry_after_date"
+    assert result["is_mandate_debit"] is True
 
 
 def test_unknown_reason_fails_safe_to_escalate():

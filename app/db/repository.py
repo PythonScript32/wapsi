@@ -188,6 +188,14 @@ def resolve_promise(promise_id: str, status: str) -> None:
     }).eq("id", promise_id).execute()
 
 
+def promises_for_case(case_id: str) -> list[dict]:
+    """Full promise history for one case -- e.g. counting broken promises to
+    enforce the "one second chance" rule (PRD §13 item 23)."""
+    resp = (get_client().table("promises").select("*")
+            .eq("case_id", case_id).order("created_at").execute())
+    return resp.data or []
+
+
 def all_promises(batch_id: str | None = None) -> list[dict]:
     """For the kept-promise-rate metric."""
     if batch_id is None:

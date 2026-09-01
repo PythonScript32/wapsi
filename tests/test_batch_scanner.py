@@ -18,6 +18,7 @@ the day-by-day wiring end to end.
 """
 from __future__ import annotations
 
+import random
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -26,6 +27,7 @@ import app.audit.log as audit_log_module
 import app.db.repository as repository_module
 from app.config import DEFAULT_POLICY
 from app.detection import batch_scanner as bs
+from app.detection import synthetic_data as sd
 
 NOW = datetime(2026, 9, 10, 9, 0, tzinfo=timezone.utc)  # mid-month, month has 20 days left
 
@@ -137,6 +139,12 @@ class FakeRepository:
     def all_promises(self, batch_id=None):
         return list(self.promises.values())
 
+    def promises_for_case(self, case_id):
+        return [p for p in self.promises.values() if p.get("case_id") == case_id]
+
+    def get_case(self, case_id):
+        return self.cases.get(case_id)
+
     def append_audit(self, row):
         self.audit_log.append(dict(row))
 
@@ -150,7 +158,7 @@ def fake_repo(monkeypatch):
     for name in (
         "clear_batch", "insert_case", "gate_context", "insert_attempt", "get_attempt_by_key",
         "update_attempt", "insert_outreach", "increment_attempts", "update_case", "mark_recovered",
-        "insert_promise", "due_promises", "resolve_promise",
+        "insert_promise", "due_promises", "resolve_promise", "promises_for_case", "get_case",
         "attempts_for_case", "outreach_for_case", "all_promises", "append_audit", "audit_for_case",
     ):
         monkeypatch.setattr(repository_module, name, getattr(repo, name))
@@ -453,6 +461,61 @@ def test_naive_baseline_lands_in_the_realistic_range_on_the_real_dev_dataset():
 
 
 # ---------------------------------------------------------------------------
+# regression: insufficient_funds recovery must not depend on what day of the
+# month the batch happens to run on
+# ---------------------------------------------------------------------------
+
+_DAYS_OF_MONTH_TO_CHECK = [1, 10, 20, 28]
+
+
+def _insufficient_funds_batch(now: datetime, n: int = 30, seed: int = 7) -> list[dict]:
+    """A representative slice of freshly-detected insufficient_funds cases,
+    with created_at generated the same way app.detection.synthetic_data does
+    (within 72h of `now`) but anchored to a caller-chosen `now` instead of the
+    real wall clock -- so the day-of-month regression test below can pin it
+    to the 1st/10th/20th/28th without the dataset's own generation time
+    leaking in as a confound."""
+    rng = random.Random(seed)
+    return [
+        make_case(
+            id=f"case_domreg_{i}",
+            created_at=(now - timedelta(hours=rng.randint(0, 72))).isoformat(),
+            latent=sd._make_latent("insufficient_funds", rng),
+        )
+        for i in range(n)
+    ]
+
+
+def test_insufficient_funds_recovery_does_not_silently_depend_on_day_of_month(monkeypatch):
+    """Regression guard: _next_salary_day()'s heuristic (1st/month-end
+    cluster) can land anywhere from 1 to ~29 days out depending purely on
+    what day of the month `now` is. Before the grace-period fallback in
+    app/decision/engine.py (_decide_insufficient_funds_link_fallback), a
+    schedule that landed past grace_period_days was still proposed as a
+    mandate-debit retry, guaranteed to be G5-blocked into CLOSED_LOST once
+    the clock reached it -- so insufficient_funds recovery could silently
+    collapse to 0% just because the batch happened to run on, say, the 1st
+    instead of the 28th. Runs the same representative case mix with `now`
+    pinned to four different days of the month and asserts recovery stays in
+    a reasonable, stable band throughout.
+    """
+    monkeypatch.setattr(repository_module, "bulk_insert", lambda table, rows, chunk_size=500: len(rows))
+
+    rates: dict[int, float] = {}
+    for day in _DAYS_OF_MONTH_TO_CHECK:
+        now = datetime(2026, 9, day, 9, 0, tzinfo=timezone.utc)
+        cases = _insufficient_funds_batch(now)
+        monkeypatch.setattr(bs, "_load_dataset", lambda set_name, cases=cases: cases)
+        result = bs.run_batch("dev", horizon_days=30, live=False, now=now)
+        rates[day] = result["recovery_by_reason"].get("insufficient_funds", {}).get("rate", 0.0)
+
+    for day, rate in rates.items():
+        assert rate >= 0.35, f"day {day} of month: insufficient_funds recovery collapsed to {rate:.1%} ({rates})"
+    spread = max(rates.values()) - min(rates.values())
+    assert spread <= 0.40, f"insufficient_funds recovery swings wildly by day of month: {rates}"
+
+
+# ---------------------------------------------------------------------------
 # run_batch — end to end wiring, small crafted datasets, fake repo
 # ---------------------------------------------------------------------------
 
@@ -487,10 +550,14 @@ def test_run_batch_mandate_debit_takes_at_least_two_days(monkeypatch, fake_repo)
     the end-of-horizon sweep (fix: no case may finish non-terminal) closes
     the still-SCHEDULED case as CLOSED_LOST — that's the correct, honest
     outcome for "we didn't have time to see this through," not a bug."""
-    case = make_case(id="case_if1")
+    # created_at must land inside the grace period relative to the guessed
+    # salary day, or the decision engine now falls back to send_link instead
+    # of a mandate debit (see app/decision/engine.py's grace-period check) —
+    # that's a different code path than the one this test exercises.
+    case = make_case(id="case_if1", created_at=NEAR_MONTH_END.isoformat())
     monkeypatch.setattr(bs, "_load_dataset", lambda set_name: [case])
 
-    bs.run_batch("dev", horizon_days=1, live=False, now=NOW, persist="supabase")
+    bs.run_batch("dev", horizon_days=1, live=False, now=NEAR_MONTH_END, persist="supabase")
 
     assert fake_repo.attempts_by_key == {}  # no charge attempted on day 0
     notices = [o for o in fake_repo.outreach if o["channel"] == "pre_debit_notice"]
