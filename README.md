@@ -99,19 +99,49 @@ cd dashboard && npm install && npm run dev  # dashboard → :5173
 
 ## Results
 
-Measured on a **300-case held-out batch** never used for tuning.
-_Populated after the final run:_
+Measured on the **300-case held-out batch** (`data/cases_holdout.json`, seed
+`20260905`). Run **exactly once**, after every other change in this repo was
+finalized — these are the actual first-and-only numbers that run produced,
+never re-run and never tuned against.
 
 | Metric | Naive baseline | वापसी |
 | --- | --- | --- |
-| Recovery rate (count) | — | — |
-| Recovery rate (value) | — | — |
-| **Lift over baseline** | — | **—** |
-| Ceiling capture | — | — |
-| Kept-promise rate | — | — |
+| Recovery rate (count) | 15.7% | 48.0% |
+| Recovery rate (value) | — | 44.7% |
+| **Lift over baseline (count)** | — | **+206.4%** |
+| Ceiling capture | — | 79.3% |
+| Kept-promise rate | — | 32.1% (17/53) |
 | Double-charges | — | **0** |
 
-Plus a full exception list: every unrecovered case, grouped by reason, with why.
+Full exception list (every unrecovered case, grouped by reason, with why) and
+the four safety invariants (all `PASS`) are in `data/results_holdout.json`
+(gitignored, generated locally) and rendered live on the dashboard's Metrics
+screen.
+
+### Dev vs holdout — do the numbers generalize?
+
+The 100-case dev set (`data/cases_dev.json`, seed `42`) was used for all
+tuning during the build. It's shown here for exactly one reason: to let you
+check that the holdout numbers above aren't a fluke of one particular sample —
+they land in the same range as dev, not off in some entirely different
+direction, which is what you'd expect if the pipeline generalizes rather than
+overfits.
+
+| Metric | Dev (100 cases) | Holdout (300 cases) |
+| --- | --- | --- |
+| Recovery rate (count) | 50.0% | 48.0% |
+| Recovery rate (value) | 42.9% | 44.7% |
+| Lift over baseline (count) | +194.1% | +206.4% |
+| Ceiling capture | 86.6% | 79.3% |
+| Kept-promise rate | 27.3% (3/11) | 32.1% (17/53) |
+| Double-charges | 0 | 0 |
+
+Nothing here is cherry-picked: ceiling capture is the one metric that moves
+more than a few points between the two sets (86.6% vs 79.3%), and it's
+reported as-is rather than smoothed over, not investigated further here. Both
+kept-promise rates rest on small denominators (11 and 53 resolved promises
+respectively) — real numbers, not hidden behind a bare percentage, but not
+something to over-read either.
 
 ## What's real vs simulated
 
