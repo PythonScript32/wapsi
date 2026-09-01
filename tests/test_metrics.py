@@ -111,6 +111,32 @@ def test_kept_promise_rate_is_none_with_no_resolved_promises():
     assert result["kept_promise_rate"] is None
 
 
+def test_kept_promise_rate_reports_its_denominator_alongside_the_rate():
+    """A rate alone hides how small the sample is (e.g. ~11 resolved
+    promises on the dev set) -- kept_promise_kept_count /
+    kept_promise_resolved_count must be reported so the caller can render
+    "27.3% (3/11)" instead of a bare, misleadingly solid-looking percentage."""
+    promises = [{"status": "kept"}, {"status": "kept"}, {"status": "kept"}, {"status": "broken"}] + [
+        {"status": "broken"}
+    ] * 8  # 3 kept, 9 broken -- 12 resolved
+    result = metrics.compute([make_case()], promises=promises)
+    assert result["kept_promise_kept_count"] == 3
+    assert result["kept_promise_resolved_count"] == 12
+    assert result["kept_promise_rate"] == pytest.approx(3 / 12)
+
+
+def test_kept_promise_counts_are_zero_with_no_resolved_promises():
+    result = metrics.compute([make_case()], promises=[{"status": "pending"}])
+    assert result["kept_promise_kept_count"] == 0
+    assert result["kept_promise_resolved_count"] == 0
+
+
+def test_kept_promise_counts_ignore_still_pending_promises():
+    promises = [{"status": "kept"}, {"status": "broken"}, {"status": "pending"}, {"status": "pending"}]
+    result = metrics.compute([make_case()], promises=promises)
+    assert result["kept_promise_resolved_count"] == 2  # the 2 pending ones don't count
+
+
 def test_false_escalation_rate_counts_a_case_recovered_after_escalation():
     audit_rows = [
         {"case_id": "c1", "event_type": "ESCALATED", "ts": "2026-01-05T10:00:00+00:00"},

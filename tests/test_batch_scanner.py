@@ -28,6 +28,7 @@ import app.db.repository as repository_module
 from app.config import DEFAULT_POLICY
 from app.detection import batch_scanner as bs
 from app.detection import synthetic_data as sd
+from app.scheduler import jobs as scheduler_jobs
 
 NOW = datetime(2026, 9, 10, 9, 0, tzinfo=timezone.utc)  # mid-month, month has 20 days left
 
@@ -373,7 +374,9 @@ def test_resolve_due_promises_does_not_recover_a_kept_promise_that_is_not_latent
     """Same ceiling regression as the already_paid/pay_now case above, for
     the promise-kept path: a case latent says can never actually recover
     must not be recovered just because it also (independently) keeps a
-    promise in the synthetic data."""
+    promise in the synthetic data. Exercised through the Scheduler now
+    (app.scheduler.jobs), with batch_scanner's own latent-reading is_paid
+    closure -- the same wiring run_batch() uses."""
     case = make_case(id="case_np1", amount=499.0)
     case["latent"] = {**case["latent"], "recoverable": False, "keeps_promise": True}
     cases = {"case_np1": case}
@@ -381,9 +384,9 @@ def test_resolve_due_promises_does_not_recover_a_kept_promise_that_is_not_latent
         "case_id": "case_np1", "promised_amount": 499.0,
         "promised_date": NOW.date().isoformat(), "status": "pending", "source": "text",
     })
-    clock = bs.SimulatedClock(NOW)
+    scheduler = scheduler_jobs.Scheduler(cases, promise_is_paid=bs._is_paid(cases))
 
-    bs._resolve_due_promises(cases, clock)
+    scheduler._resolve_due_promises(NOW)
 
     assert case["state"] != "RECOVERED"
     promise = next(iter(fake_repo.promises.values()))
@@ -398,9 +401,9 @@ def test_resolve_due_promises_recovers_a_kept_promise_that_is_latent_recoverable
         "case_id": "case_np2", "promised_amount": 499.0,
         "promised_date": NOW.date().isoformat(), "status": "pending", "source": "text",
     })
-    clock = bs.SimulatedClock(NOW)
+    scheduler = scheduler_jobs.Scheduler(cases, promise_is_paid=bs._is_paid(cases))
 
-    bs._resolve_due_promises(cases, clock)
+    scheduler._resolve_due_promises(NOW)
 
     assert case["state"] == "RECOVERED"
     promise = next(iter(fake_repo.promises.values()))
@@ -1150,6 +1153,39 @@ def test_print_summary_cost_per_recovered_rupee_is_not_flattened_to_zero(capsys)
     out = capsys.readouterr().out
     assert "cost per recovered Rs   : 0.0018\n" in out
     assert "cost per recovered Rs   : 0.00\n" not in out
+
+
+# ---------------------------------------------------------------------------
+# _fmt_pct_n -- a rate must show its sample size, not just the percentage
+# ---------------------------------------------------------------------------
+
+def test_fmt_pct_n_shows_percentage_and_fraction():
+    assert bs._fmt_pct_n(3 / 11, 3, 11) == "27.3% (3/11)"
+
+
+def test_fmt_pct_n_none_is_reported_as_not_available_with_zero_over_zero():
+    assert bs._fmt_pct_n(None, 0, 0) == "n/a (0/0)"
+
+
+def test_print_summary_kept_promise_rate_shows_its_denominator(capsys):
+    bs._print_summary("dev", {
+        "total_cases": 1, "recovered_count": 1, "recovery_rate_count": 1.0,
+        "recovered_value": 100.0, "at_risk_value": 100.0, "recovery_rate_value": 1.0,
+        "exception_list": [], "gate_block_counts": {},
+        "kept_promise_rate": 3 / 11, "kept_promise_kept_count": 3, "kept_promise_resolved_count": 11,
+    })
+    out = capsys.readouterr().out
+    assert "kept-promise rate       : 27.3% (3/11)\n" in out
+
+
+def test_print_summary_kept_promise_rate_with_no_data_shows_zero_over_zero(capsys):
+    bs._print_summary("dev", {
+        "total_cases": 1, "recovered_count": 0, "recovery_rate_count": 0.0,
+        "recovered_value": 0.0, "at_risk_value": 100.0, "recovery_rate_value": 0.0,
+        "exception_list": [], "gate_block_counts": {},
+    })
+    out = capsys.readouterr().out
+    assert "kept-promise rate       : n/a (0/0)\n" in out
 
 
 def test_safety_invariants_hold_on_the_real_dev_dataset(monkeypatch):

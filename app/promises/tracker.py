@@ -88,7 +88,22 @@ def record_promise(
 
     Caps promised_date at policy["max_promise_horizon_days"] (default from
     config.DEFAULT_POLICY), flagging when it did -- FR-D5, never a silent
-    truncation.
+    truncation. ALSO caps it at the case's own grace-period deadline
+    (case.created_at + policy["grace_period_days"]), whichever is tighter:
+    without this, a promise made partway through a case's life can request
+    right up to the horizon and land AFTER the case's own grace deadline
+    (both default to 14 days, so any promise made on day D>=1 near the
+    horizon cap lands past day 14). Governance's G5 gate is checked before
+    G10 (see app/governance/policy_gate.py), so an ungrounded promise like
+    that gets raced by G5: the case closes CLOSED_LOST while the promise is
+    still "pending", and when that orphaned promise later resolves it can
+    even flip the case from CLOSED_LOST back to RECOVERED (repository's
+    terminal-state guard only blocks a terminal case regressing to a
+    non-terminal one, not one terminal state replacing another). Bounding
+    the promise to the case's own remaining grace window means
+    Scheduler.tick() always resolves it (promises are resolved before the
+    per-case gate loop runs, see Scheduler.tick()) strictly before G5 could
+    ever fire for that case.
 
     PRD §13 item 23: if this case already has _MAX_BROKEN_PROMISES broken
     promises on record, refuses to create another -- escalates the case
@@ -122,14 +137,25 @@ def record_promise(
         )
         return {
             "created": False, "escalated": True, "promise": None,
-            "capped": False, "reminder_at": None, "reasoning": reasoning,
+            "capped": False, "capped_by_grace": False, "reminder_at": None, "reasoning": reasoning,
         }
 
     requested = _as_date(promised_date)
     horizon_days = int(policy.get("max_promise_horizon_days", 14))
-    latest_allowed = today + timedelta(days=horizon_days)
+    horizon_cap = today + timedelta(days=horizon_days)
+
+    # Whichever cap is tighter wins -- see the docstring above for why the
+    # grace-period cap matters as much as the horizon one.
+    grace_cap = None
+    case = repository.get_case(case_id)
+    if case and case.get("created_at"):
+        grace_days = int(policy.get("grace_period_days", 14))
+        grace_cap = _as_date(case["created_at"]) + timedelta(days=grace_days)
+
+    latest_allowed = horizon_cap if grace_cap is None else min(horizon_cap, grace_cap)
     capped = requested > latest_allowed
     final_date = min(requested, latest_allowed)
+    capped_by_grace = capped and grace_cap is not None and latest_allowed == grace_cap
 
     promise = repository.insert_promise({
         "case_id": case_id,
@@ -143,9 +169,13 @@ def record_promise(
     reminder_at = _reminder_at(final_date)
     reasoning = f"Customer ({source}) promised to pay by {final_date.isoformat()}."
     if capped:
+        bound = (
+            "the case's own grace-period deadline" if capped_by_grace
+            else f"the {horizon_days}-day promise horizon"
+        )
         reasoning += (
-            f" Requested date {requested.isoformat()} was beyond the "
-            f"{horizon_days}-day promise horizon; capped to {final_date.isoformat()}."
+            f" Requested date {requested.isoformat()} was beyond {bound} "
+            f"({latest_allowed.isoformat()}); capped to {final_date.isoformat()}."
         )
 
     audit_log.record(
@@ -153,12 +183,16 @@ def record_promise(
         inp={"source": source, "requested_date": requested.isoformat(), "amount": amount},
         decision="promise_to_pay",
         reasoning=reasoning,
-        result={"promise": promise, "capped": capped, "reminder_at": reminder_at.isoformat()},
+        result={
+            "promise": promise, "capped": capped, "capped_by_grace": capped_by_grace,
+            "reminder_at": reminder_at.isoformat(),
+        },
     )
 
     return {
         "created": True, "escalated": False, "promise": promise,
-        "capped": capped, "reminder_at": reminder_at.isoformat(), "reasoning": reasoning,
+        "capped": capped, "capped_by_grace": capped_by_grace,
+        "reminder_at": reminder_at.isoformat(), "reasoning": reasoning,
     }
 
 

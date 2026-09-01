@@ -151,6 +151,90 @@ def test_record_promise_does_not_flag_a_date_within_the_horizon(repo):
 
     assert result["capped"] is False
     assert result["promise"]["promised_date"] == near.isoformat()
+    assert result["capped_by_grace"] is False
+
+
+# ---------------------------------------------------------------------------
+# capped at the case's own grace deadline, whichever cap is tighter --
+# regression for a confirmed bug: a promise made partway through a case's
+# life could request right up to the (equally 14-day) horizon and land AFTER
+# the case's own grace deadline. Governance's G5 (grace period) is checked
+# before G10 (active promise) in app/governance/policy_gate.py, so an
+# ungrounded promise like that let the case close CLOSED_LOST via G5 while
+# the promise was still "pending" -- and the orphaned promise resolving
+# later could even flip a CLOSED_LOST case back to RECOVERED.
+# ---------------------------------------------------------------------------
+
+def test_record_promise_caps_at_the_case_grace_deadline_when_tighter_than_the_horizon(repo):
+    """Case created 10 days ago: only 4 days of grace runway left, even
+    though the policy horizon would allow up to 14. The promise must not
+    outlive the case's own grace period."""
+    created = NOW - timedelta(days=10)
+    repo.seed_case("c1", created_at=created.isoformat())
+    requested = NOW.date() + timedelta(days=13)  # within the 14-day horizon...
+
+    result = tracker.record_promise("c1", 499.0, requested, source="voice", policy=DEFAULT_POLICY, now=NOW)
+
+    grace_deadline = created.date() + timedelta(days=DEFAULT_POLICY["grace_period_days"])
+    assert result["capped"] is True
+    assert result["capped_by_grace"] is True
+    assert result["promise"]["promised_date"] == grace_deadline.isoformat()
+    assert "grace-period deadline" in result["reasoning"]
+
+
+def test_record_promise_grace_cap_never_exceeds_the_case_grace_deadline(repo):
+    """Direct reproduction of the confirmed bug: a case created on day 0,
+    with a promise made on day 5 requesting an offset of 13 days (day 18)
+    -- comfortably inside the 14-day horizon measured from day 5, but 4 days
+    past the case's own day-14 grace deadline. The fix must land the promise
+    on or before day 14, so Scheduler.tick() always resolves it (promises
+    resolve before the per-case gate loop each tick) strictly before G5
+    could ever fire for this case."""
+    created = NOW
+    repo.seed_case("c1", created_at=created.isoformat())
+    promise_made_at = NOW + timedelta(days=5)
+    requested = promise_made_at.date() + timedelta(days=13)  # day 18
+
+    result = tracker.record_promise(
+        "c1", 499.0, requested, source="voice", policy=DEFAULT_POLICY, now=promise_made_at,
+    )
+
+    grace_deadline = created.date() + timedelta(days=DEFAULT_POLICY["grace_period_days"])  # day 14
+    assert result["promise"]["promised_date"] == grace_deadline.isoformat()
+    assert date.fromisoformat(result["promise"]["promised_date"]) <= grace_deadline
+
+
+def test_record_promise_uses_the_horizon_cap_when_it_is_tighter_than_grace(repo):
+    """A case freshly created (grace deadline is a full 14 days out) under a
+    policy whose promise horizon is much shorter than its grace period --
+    the horizon is the binding constraint here, so capped_by_grace must be
+    False. (Note: with the *default* policy, where both are 14 days, grace
+    is always the tighter-or-equal cap once any time has passed since
+    creation -- this is why that default-policy case is covered by the
+    grace-deadline tests above instead.)"""
+    policy = {**DEFAULT_POLICY, "max_promise_horizon_days": 5, "grace_period_days": 14}
+    repo.seed_case("c1", created_at=NOW.isoformat())
+    requested = NOW.date() + timedelta(days=10)
+
+    result = tracker.record_promise("c1", 499.0, requested, source="voice", policy=policy, now=NOW)
+
+    assert result["capped"] is True
+    assert result["capped_by_grace"] is False
+    assert result["promise"]["promised_date"] == (NOW.date() + timedelta(days=5)).isoformat()
+
+
+def test_record_promise_falls_back_to_horizon_only_cap_when_the_case_cannot_be_found(repo):
+    """No seeded case for this id (get_case returns None): can't compute a
+    grace deadline, so the horizon cap alone still applies -- fails open to
+    the existing behaviour rather than crashing."""
+    horizon = DEFAULT_POLICY["max_promise_horizon_days"]
+    far_future = NOW.date() + timedelta(days=horizon + 30)
+
+    result = tracker.record_promise("unknown_case", 499.0, far_future, source="voice", policy=DEFAULT_POLICY, now=NOW)
+
+    assert result["capped"] is True
+    assert result["capped_by_grace"] is False
+    assert result["promise"]["promised_date"] == (NOW.date() + timedelta(days=horizon)).isoformat()
 
 
 # ---------------------------------------------------------------------------

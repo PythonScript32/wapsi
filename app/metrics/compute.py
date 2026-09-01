@@ -163,7 +163,7 @@ def compute(
     ]
 
     # ---- 4.2 operational ---------------------------------------------------
-    kept_promise_rate = _kept_promise_rate(promises)
+    kept_promise_rate, kept_promise_kept_count, kept_promise_resolved_count = _kept_promise_rate(promises)
     false_escalation_rate = _false_escalation_rate(audit_rows)
     avg_time_to_recovery_days = _avg_time_to_recovery_days(recovered)
     interventions_per_recovery = _interventions_per_recovery(attempts, outreach, recovered_count)
@@ -196,6 +196,8 @@ def compute(
         "exception_list": exception_list,
         # operational (4.2)
         "kept_promise_rate": kept_promise_rate,
+        "kept_promise_kept_count": kept_promise_kept_count,
+        "kept_promise_resolved_count": kept_promise_resolved_count,
         "false_escalation_rate": false_escalation_rate,
         "avg_time_to_recovery_days": avg_time_to_recovery_days,
         "interventions_per_recovery": interventions_per_recovery,
@@ -215,10 +217,17 @@ def compute(
 # 4.2 operational
 # ---------------------------------------------------------------------------
 
-def _kept_promise_rate(promises: list[dict]) -> float | None:
+def _kept_promise_rate(promises: list[dict]) -> tuple[float | None, int, int]:
+    """Returns (rate, kept_count, resolved_count). The denominator is
+    resolved promises only (kept + broken) -- a still-pending promise isn't
+    a data point yet. Callers must report kept_count/resolved_count
+    alongside the rate: with as few as ~11 promises on the dev set, "27.3%"
+    on its own reads as more statistically solid than it is."""
     counts = Counter(p.get("status") for p in promises)
     kept, broken = counts.get("kept", 0), counts.get("broken", 0)
-    return kept / (kept + broken) if (kept + broken) else None
+    resolved = kept + broken
+    rate = kept / resolved if resolved else None
+    return rate, kept, resolved
 
 
 def _false_escalation_rate(audit_rows: list[dict]) -> float | None:

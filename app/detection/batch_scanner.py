@@ -39,23 +39,18 @@ import json
 import os
 import random
 import time
-from collections import Counter
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 
 from app import config
 from app.audit import log as audit_log
 from app.db import repository
 from app.db.memory_repository import MemoryRepository
-from app.decision import engine
-from app.diagnosis import classifier
-from app.execution import actions
 from app.metrics import compute as metrics
 from app.promises import tracker
+from app.scheduler.jobs import Scheduler, SimulatedClock
 
 _ACTOR = "detection.batch_scanner"
-_TERMINAL_STATES = {"RECOVERED", "CLOSED_LOST", "ESCALATED"}
 _OUTREACH_INTERVENTIONS = {"request_re_mandate", "request_card_update", "send_link", "send_link_with_offer"}
 
 # Every function app.db.repository exposes. Swapping these — and only these —
@@ -71,18 +66,6 @@ _REPOSITORY_FUNCTIONS = (
     "resolve_promise", "all_promises", "promises_for_case", "append_audit", "audit_for_case",
     "audit_by_event", "gate_context",
 )
-
-
-@dataclass
-class SimulatedClock:
-    """Fast-forwards days so a 14-day recovery sequence evaluates in seconds.
-    Mirrors the shape app/scheduler/jobs.py will eventually own for live
-    mode; batch mode needs its own right now."""
-
-    now: datetime
-
-    def advance(self, days: int = 1) -> None:
-        self.now += timedelta(days=days)
 
 
 def _parse_ts(value: Any) -> datetime | None:
@@ -259,47 +242,30 @@ def run_batch(
         cases = _ingest(batch_id, raw_cases)
 
         clock = SimulatedClock(now or datetime.now(timezone.utc))
-        next_action_at: dict[str, datetime] = {case_id: clock.now for case_id in cases}
-        decision_cache: dict[str, dict] = {}
-        gate_block_counts: Counter = Counter()
-        # Cases whose opt-out has already had its one confirming pass through
-        # the gate (G2) — only these are skipped outright. A case that JUST
-        # opted out still gets one more _process_case call so G2 actually
-        # fires and lands in the audit trail, instead of being silently
-        # enforced by this loop filter alone.
-        opt_out_gate_confirmed: set[str] = set()
+        # Scheduler owns next_action_at/decision_cache/gate_block_counts/
+        # opt_out_gate_confirmed internally now -- tick() is the exact same
+        # per-day body this loop used to run inline (see
+        # app/scheduler/jobs.py), so live mode's APScheduler-driven tick()
+        # can never diverge from what a batch run does. on_action_executed
+        # and promise_is_paid are the two places this simulated run reads
+        # case["latent"] (this module is the only one allowed to); live mode
+        # passes neither.
+        scheduler = Scheduler(
+            cases, live=live, on_action_executed=_simulate_outcome, promise_is_paid=_is_paid(cases),
+        )
 
         for day_no in range(1, horizon_days + 1):
-            today = clock.now
-            _resolve_due_promises(cases, clock)
+            summary = scheduler.tick(clock.now)
 
-            for case_id, case in list(cases.items()):
-                if case["state"] in _TERMINAL_STATES:
-                    continue
-                if case.get("opted_out") and case_id in opt_out_gate_confirmed:
-                    continue
-                due = next_action_at.get(case_id, today)
-                if due.date() > today.date():
-                    continue
-                was_opted_out = bool(case.get("opted_out"))
-                _process_case(case, clock, live, next_action_at, decision_cache, gate_block_counts)
-                if was_opted_out:
-                    # opted_out was already true when _process_case ran, so
-                    # whatever gate_check it hit saw it and G2 fired — this
-                    # case's confirming pass is done, skip it from now on.
-                    opt_out_gate_confirmed.add(case_id)
-
-            active = sum(1 for c in cases.values() if c["state"] not in _TERMINAL_STATES and not c.get("opted_out"))
-            recovered = sum(1 for c in cases.values() if c["state"] == "RECOVERED")
             elapsed = time.perf_counter() - started_at
             print(
-                f"  day {day_no:>3}/{horizon_days}  active={active:>4}  "
-                f"recovered={recovered:>4}  elapsed={elapsed:.1f}s"
+                f"  day {day_no:>3}/{horizon_days}  active={summary['active']:>4}  "
+                f"recovered={summary['recovered']:>4}  elapsed={elapsed:.1f}s"
             )
 
             clock.advance(1)
 
-        swept = _sweep_unresolved(cases, clock.now)
+        swept = scheduler.sweep_unresolved(clock.now)
         if swept:
             print(f"  swept {swept:>4} unresolved cases -> CLOSED_LOST at end of horizon")
 
@@ -316,7 +282,7 @@ def run_batch(
     ceiling = _compute_ceiling(list(cases.values()))
     clean_cases = [{k: v for k, v in c.items() if k != "latent"} for c in cases.values()]
     result = metrics.compute(
-        clean_cases, naive=naive, ceiling=ceiling, gate_block_counts=dict(gate_block_counts),
+        clean_cases, naive=naive, ceiling=ceiling, gate_block_counts=dict(scheduler.gate_block_counts),
         attempts=batch_records["attempts"], outreach=batch_records["outreach"],
         promises=batch_records["promises"], audit_rows=batch_records["audit"],
         policy=policy,
@@ -327,34 +293,6 @@ def run_batch(
     metrics.export_snapshot(result, out_path)
     result["_snapshot_path"] = out_path
     return result
-
-
-def _sweep_unresolved(cases: dict[str, dict], now: datetime) -> int:
-    """
-    End-of-horizon sweep: no case may finish a batch in a non-terminal
-    state. Anything still active when the observation window runs out
-    (including a case whose opt-out never got past its confirming G2 pass,
-    or one still mid-retry) is closed as CLOSED_LOST — an artifact of the
-    batch's finite horizon, not a governance verdict, so it logs its own
-    honest reason rather than borrowing G5's.
-    """
-    swept = 0
-    for case_id, case in cases.items():
-        if case["state"] in _TERMINAL_STATES:
-            continue
-        prior_state = case["state"]
-        repository.update_case(case_id, state="CLOSED_LOST")
-        case["state"] = "CLOSED_LOST"
-        audit_log.record(
-            case_id, _ACTOR, audit_log.CLOSED_LOST,
-            reasoning=(
-                f"Case was still {prior_state} when the batch's observation window ended "
-                f"on {now.date().isoformat()}, with no resolution in sight. Closing as lost "
-                "rather than reporting it as neither recovered nor actively pursued."
-            ),
-        )
-        swept += 1
-    return swept
 
 
 def _ingest(batch_id: str, raw_cases: list[dict]) -> dict[str, dict]:
@@ -378,145 +316,15 @@ def _ingest(batch_id: str, raw_cases: list[dict]) -> dict[str, dict]:
 
 
 # ---------------------------------------------------------------------------
-# per-day, per-case processing
+# callbacks injected into app.scheduler.jobs.Scheduler -- the only two places
+# THIS run reads case["latent"], since only this module may.
 # ---------------------------------------------------------------------------
 
-def _process_case(
-    case: dict,
-    clock: SimulatedClock,
-    live: bool,
-    next_action_at: dict[str, datetime],
-    decision_cache: dict[str, dict],
-    gate_block_counts: Counter,
-) -> None:
-    """
-    decision_cache holds the ONE decision a case is currently pursuing while
-    it waits on a mandate-debit notice/schedule. Re-calling decide() on every
-    waiting day would be wrong: "now" advancing can shift a freshly-computed
-    salary-day guess, turning "wait until day 20" into a moving target that's
-    never actually reached. The cache is cleared the moment the case's
-    planned action is actually attempted, so the next wait (if any) starts
-    from a fresh decision.
-    """
-    case_id = case["id"]
-    now = clock.now
-    policy = config.DEFAULT_POLICY
-
-    if case["state"] == "DETECTED":
-        category, _how = classifier.classify(case)
-        case["reason_category"] = category
-        case["state"] = "DIAGNOSED"
-        repository.update_case(case_id, state="DIAGNOSED", reason_category=category)
-
-    decision = decision_cache.get(case_id) or engine.decide(case, [], policy, now=now)
-    scheduled = _parse_ts(decision.get("scheduled_for"))
-
-    if decision.get("is_mandate_debit"):
-        context = repository.gate_context(case_id)
-        notice_at = _parse_ts(context.get("pre_debit_notice_at"))
-
-        if notice_at is None:
-            # Nothing sent yet: send it now, however far out the scheduled
-            # charge is. It only needs to be aged by the scheduled date, and
-            # sending it early never hurts.
-            result = actions.execute(decision, case, policy, live=live, now=now)
-            _tally_gate(result, gate_block_counts)
-
-            # The notice-send is itself a governed action: a G5 block (case
-            # aged past the grace period) translates straight to CLOSED_LOST
-            # instead of the generic "keep waiting" path below.
-            result_intervention = result.get("intervention")
-            if result_intervention == "close_lost":
-                case["state"] = "CLOSED_LOST"
-                decision_cache.pop(case_id, None)
-                return
-
-            retry_at = _parse_ts(result.get("retry_at"))
-            next_action_at[case_id] = retry_at or (now + timedelta(days=1))
-            case["state"] = "SCHEDULED"
-            repository.update_case(case_id, state="SCHEDULED")
-            decision_cache[case_id] = decision  # keep pursuing this same plan
-            return
-
-        notice_hours = int(policy.get("rbi_pre_debit_notice_hours", 24))
-        notice_aged = (now - notice_at).total_seconds() / 3600 >= notice_hours
-        schedule_due = scheduled is None or scheduled.date() <= now.date()
-
-        if not (notice_aged and schedule_due):
-            candidates = []
-            if not notice_aged:
-                candidates.append(notice_at + timedelta(hours=notice_hours))
-            if not schedule_due:
-                candidates.append(scheduled)
-            next_action_at[case_id] = max(candidates)
-            case["state"] = "SCHEDULED"
-            repository.update_case(case_id, state="SCHEDULED")
-            decision_cache[case_id] = decision  # keep pursuing this same plan
-            return
-        # both conditions satisfied — fall through to the real charge attempt
-
-    decision_cache.pop(case_id, None)  # this decision is being acted on now
-
-    result = actions.execute(decision, case, policy, live=live, now=now)
-    _tally_gate(result, gate_block_counts)
-
-    # What actually happened, not what the decision originally proposed: a
-    # G3/G6-escalate or G5 block translates the intervention actions.py
-    # returns, which can differ from `intervention` above (e.g. a
-    # retry_after_date that got G3-blocked comes back as "escalate").
-    result_intervention = result.get("intervention")
-
-    if result.get("escalated") or result_intervention == "escalate":
-        case["state"] = "ESCALATED"
-        return
-    if result_intervention == "close_lost":
-        case["state"] = "CLOSED_LOST"
-        return
-
-    if not result.get("executed") or result.get("reused"):
-        next_action_at[case_id] = now + timedelta(days=1)
-        return
-
-    case["attempts_made"] = int(case.get("attempts_made") or 0) + 1
-    recovered = _simulate_outcome(case, decision, clock)
-
-    if recovered:
-        amount = float(case.get("amount") or 0)
-        case["state"] = "RECOVERED"
-        case["recovered_amount"] = amount
-        case["recovered_at"] = now.isoformat()
-        repository.mark_recovered(case_id, amount)
-        audit_log.record(case_id, _ACTOR, audit_log.RECOVERED, reasoning=f"Recovered via {result_intervention}.")
-        return
-
-    if case["state"] in ("PROMISE_MADE", "ESCALATED"):
-        return  # _simulate_outcome's reply routing already moved it there
-
-    case["state"] = actions._NEXT_STATE.get(result_intervention, case["state"])
-    next_action_at[case_id] = now + timedelta(days=1)
-
-
-def _tally_gate(result: dict, gate_block_counts: Counter) -> None:
-    gate = result.get("gate")
-    if gate:
-        gate_block_counts[gate] += 1
-
-
-# ---------------------------------------------------------------------------
-# promise resolution (Feature D, minimal inline version)
-# ---------------------------------------------------------------------------
-
-def _resolve_due_promises(cases: dict[str, dict], clock: SimulatedClock) -> None:
-    """
-    Delegates the actual promise lifecycle to tracker.resolve_due_promises.
-    This wrapper's only two jobs: (a) supply the paid/not-paid verdict from
-    case["latent"]["keeps_promise"] -- the one piece of ground truth
-    tracker.py must never read itself, since only this module may -- and (b)
-    mirror the result back onto this loop's own in-memory `cases` dict, same
-    as every other per-day step here does (repository writes and this dict
-    are separate copies; see MemoryRepository's module docstring).
-    """
-    def is_paid(promise: dict) -> bool:
+def _is_paid(cases: dict[str, dict]) -> Callable[[dict], bool]:
+    """Scheduler's promise_is_paid callback: a closure over this run's own
+    `cases` dict (the same object Scheduler holds), so it always sees
+    current state without needing its own copy."""
+    def check(promise: dict) -> bool:
         case = cases.get(promise.get("case_id"))
         latent = (case or {}).get("latent") or {}
         # recoverable=False is the ground-truth ceiling: a case that can
@@ -524,34 +332,25 @@ def _resolve_due_promises(cases: dict[str, dict], clock: SimulatedClock) -> None
         # must never exceed 100%) would be a self-contradiction in the
         # synthetic data, not a real outcome.
         return bool(latent.get("recoverable")) and bool(latent.get("keeps_promise"))
-
-    results = tracker.resolve_due_promises(
-        clock.now.date().isoformat(), config.DEFAULT_POLICY, is_paid=is_paid, now=clock.now,
-    )
-    for result in results:
-        case = cases.get(result["case_id"])
-        if case is None:
-            continue
-        case["state"] = result["case_state"]
-        if result["status"] == "kept":
-            amount = float(case.get("amount") or 0)
-            case["recovered_amount"] = amount
-            case["recovered_at"] = clock.now.isoformat()
+    return check
 
 
 # ---------------------------------------------------------------------------
 # the outcome simulator — the ONLY code allowed to read case["latent"]
 # ---------------------------------------------------------------------------
 
-def _simulate_outcome(case: dict, decision: dict, clock: SimulatedClock) -> bool:
+def _simulate_outcome(case: dict, decision: dict, now: datetime) -> bool:
     """
     Judges whether the action just executed actually recovers the money, and
     simulates the customer's reply when the model says they'd respond to
     this outreach — exactly the outcome a real webhook or inbound message
     would report later, never something the pipeline decided for itself.
+
+    This is app.scheduler.jobs.Scheduler's on_action_executed callback for a
+    simulated run — live mode passes none, since a real charge's outcome
+    arrives later via an actual webhook, not synchronously from a tick.
     """
     latent = case.get("latent") or {}
-    now = clock.now
 
     reply_outcome = _maybe_route_reply(case, decision, latent, now)
     if reply_outcome is not None:
@@ -757,6 +556,13 @@ def _fmt_pct(value: float | None) -> str:
     return f"{value * 100:.1f}%" if value is not None else "n/a"
 
 
+def _fmt_pct_n(value: float | None, numerator: int, denominator: int) -> str:
+    """Same as _fmt_pct, but with the sample size shown alongside it -- a
+    rate over a handful of data points (e.g. ~11 resolved promises on the
+    dev set) reads as far more solid on its own than "(3/11)" makes honest."""
+    return f"{_fmt_pct(value)} ({numerator}/{denominator})"
+
+
 def _fmt_ratio(value: float | None, unit: str = "", decimals: int = 2) -> str:
     return f"{value:.{decimals}f}{unit}" if value is not None else "n/a"
 
@@ -779,7 +585,10 @@ def _print_summary(set_name: str, m: dict) -> None:
     print(f"  ceiling capture    : {_fmt_pct(m.get('ceiling_capture'))}")
 
     print("\n-- OPERATIONAL --")
-    print(f"  kept-promise rate       : {_fmt_pct(m.get('kept_promise_rate'))}")
+    print(
+        f"  kept-promise rate       : "
+        f"{_fmt_pct_n(m.get('kept_promise_rate'), m.get('kept_promise_kept_count', 0), m.get('kept_promise_resolved_count', 0))}"
+    )
     print(f"  false-escalation rate   : {_fmt_pct(m.get('false_escalation_rate'))}")
     print(f"  avg time to recovery    : {_fmt_ratio(m.get('avg_time_to_recovery_days'), ' days')}")
     print(f"  interventions/recovery  : {_fmt_ratio(m.get('interventions_per_recovery'))}")

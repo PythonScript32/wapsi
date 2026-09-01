@@ -31,6 +31,9 @@ GROQ_WHISPER_MODEL = os.getenv("GROQ_WHISPER_MODEL", "whisper-large-v3-turbo")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")    # outbound voice (stretch)
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "")
 
+# --- Scheduler ----------------------------------------------------------
+SCHEDULER_INTERVAL_MINUTES = int(os.getenv("SCHEDULER_INTERVAL_MINUTES", "15"))
+
 # --- Recovery policy — the bounds the governance gate enforces --------------
 DEFAULT_POLICY = {
     # hard bounds
