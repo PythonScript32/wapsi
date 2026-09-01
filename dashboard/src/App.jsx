@@ -8,13 +8,17 @@
  *
  * Build order: Pipeline -> Case detail -> Metrics.
  */
-import { useState } from 'react'
+import { NavLink, Route, Routes } from 'react-router-dom'
+import PipelineBoard from './components/PipelineBoard'
+import CaseDetailPage from './pages/CaseDetailPage'
+import MetricsPage from './pages/MetricsPage'
 
-const TABS = ['Pipeline', 'Case detail', 'Metrics']
+const NAV = [
+  { to: '/', label: 'Pipeline', end: true },
+  { to: '/metrics', label: 'Metrics' },
+]
 
 export default function App() {
-  const [tab, setTab] = useState('Pipeline')
-
   return (
     <div className="min-h-screen">
       <header className="border-b border-line px-6 py-4 flex items-center gap-4">
@@ -22,25 +26,27 @@ export default function App() {
           वापसी <span className="text-muted font-normal">· Revenue Recovery</span>
         </h1>
         <nav className="ml-auto flex gap-1">
-          {TABS.map((t) => (
-            <button
-              key={t}
-              onClick={() => setTab(t)}
-              className={`px-3 py-1.5 rounded-md text-sm ${
-                tab === t ? 'bg-panel text-white' : 'text-muted hover:text-white'
-              }`}
+          {NAV.map(({ to, label, end }) => (
+            <NavLink
+              key={to}
+              to={to}
+              end={end}
+              className={({ isActive }) =>
+                `px-3 py-1.5 rounded-md text-sm ${isActive ? 'bg-panel text-white' : 'text-muted hover:text-white'}`
+              }
             >
-              {t}
-            </button>
+              {label}
+            </NavLink>
           ))}
         </nav>
       </header>
 
       <main className="p-6">
-        {/* TODO: render <PipelineBoard/>, <CaseDetail/>, <MetricsPage/> */}
-        <div className="rounded-lg border border-line bg-panel p-8 text-muted">
-          {tab} — wire this up to Supabase (see src/lib/supabase.js).
-        </div>
+        <Routes>
+          <Route path="/" element={<PipelineBoard />} />
+          <Route path="/cases/:caseId" element={<CaseDetailPage />} />
+          <Route path="/metrics" element={<MetricsPage />} />
+        </Routes>
       </main>
     </div>
   )
