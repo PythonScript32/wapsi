@@ -145,8 +145,22 @@ def compute(
         if c.get("state") == "RECOVERED":
             row["recovered"] += 1
             row["recovered_amount"] += float(c.get("recovered_amount") or c.get("amount") or 0)
+    # naive's per-reason breakdown (batch_scanner.naive_baseline's by_reason)
+    # merged in here so the dashboard's "ours vs naive per reason" chart
+    # reads one pre-computed pair per category, never recomputing naive
+    # itself (that needs latent, which only batch_scanner may read).
+    naive_by_reason = (naive or {}).get("by_reason") or {}
     recovery_by_reason = {
-        reason: {**row, "rate": (row["recovered"] / row["count"]) if row["count"] else 0.0}
+        reason: {
+            **row,
+            "rate": (row["recovered"] / row["count"]) if row["count"] else 0.0,
+            "naive_count": naive_by_reason.get(reason, {}).get("count", 0),
+            "naive_recovered": naive_by_reason.get(reason, {}).get("recovered_count", 0),
+            "naive_rate": (
+                naive_by_reason[reason]["recovered_count"] / naive_by_reason[reason]["count"]
+                if naive_by_reason.get(reason, {}).get("count") else 0.0
+            ),
+        }
         for reason, row in by_reason.items()
     }
 

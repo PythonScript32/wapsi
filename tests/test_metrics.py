@@ -60,6 +60,51 @@ def test_compute_works_with_no_optional_data_at_all():
 
 
 # ---------------------------------------------------------------------------
+# recovery_by_reason -- naive's per-reason breakdown merged in, for the
+# dashboard's "ours vs naive, one pair of bars per reason" chart. Never
+# recomputed client-side: naive needs latent, which only batch_scanner may
+# read, so this merge is the one place ours and naive-per-reason meet.
+# ---------------------------------------------------------------------------
+
+def test_recovery_by_reason_merges_in_the_naive_breakdown():
+    cases = [
+        make_case(id="a1", reason_category="insufficient_funds", state="RECOVERED", amount=100.0, recovered_amount=100.0),
+        make_case(id="a2", reason_category="insufficient_funds", state="CLOSED_LOST", amount=100.0, recovered_amount=0.0, recovered_at=None),
+    ]
+    naive = {
+        "recovered_count": 1, "recovered_value": 100.0, "total_count": 2, "at_risk_value": 200.0,
+        "by_reason": {"insufficient_funds": {"count": 2, "recovered_count": 1}},
+    }
+    result = metrics.compute(cases, naive=naive)
+    row = result["recovery_by_reason"]["insufficient_funds"]
+    assert row["naive_count"] == 2
+    assert row["naive_recovered"] == 1
+    assert row["naive_rate"] == 0.5
+    # "ours" for the same reason is untouched by the merge
+    assert row["count"] == 2
+    assert row["recovered"] == 1
+    assert row["rate"] == 0.5
+
+
+def test_recovery_by_reason_naive_fields_default_to_zero_without_a_breakdown():
+    """naive supplied but with no by_reason key (an old-shaped caller, or a
+    reason naive_baseline never saw) -- must not crash, degrades to 0."""
+    result = metrics.compute([make_case(reason_category="insufficient_funds")], naive={"total_count": 1})
+    row = result["recovery_by_reason"]["insufficient_funds"]
+    assert row["naive_count"] == 0
+    assert row["naive_recovered"] == 0
+    assert row["naive_rate"] == 0.0
+
+
+def test_recovery_by_reason_naive_fields_default_to_zero_with_no_naive_at_all():
+    result = metrics.compute([make_case(reason_category="insufficient_funds")])
+    row = result["recovery_by_reason"]["insufficient_funds"]
+    assert row["naive_count"] == 0
+    assert row["naive_recovered"] == 0
+    assert row["naive_rate"] == 0.0
+
+
+# ---------------------------------------------------------------------------
 # ceiling_capture -- recovered_value can never exceed the recoverable ceiling
 # ---------------------------------------------------------------------------
 

@@ -513,6 +513,11 @@ def test_naive_baseline_aggregates_across_the_dataset(monkeypatch):
         "recovered_value": 400.0,
         "total_count": 4,
         "at_risk_value": 1000.0,
+        "by_reason": {
+            "technical_other": {"count": 2, "recovered_count": 1},
+            "bank_downtime": {"count": 1, "recovered_count": 1},
+            "mandate_revoked": {"count": 1, "recovered_count": 0},
+        },
     }
 
 

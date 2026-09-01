@@ -39,6 +39,7 @@ import json
 import os
 import random
 import time
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -509,19 +510,29 @@ def naive_baseline(set_name: str = "dev") -> dict:
     The topup chance is drawn from a per-case-id-seeded RNG, so re-running
     naive_baseline() on the same dataset always gives the same result —
     the same reproducibility discipline as the dataset's own generation.
+
+    by_reason: {reason: {"count", "recovered_count"}} -- the dashboard's
+    recovery-by-reason chart needs an "ours vs naive" pair per category, and
+    naive's per-reason rate can only be computed here (it needs latent,
+    which only this module may read) -- never recomputed client-side.
     """
     cases = _load_dataset(set_name)
     recovered_count = 0
     recovered_value = 0.0
+    by_reason: dict[str, dict] = defaultdict(lambda: {"count": 0, "recovered_count": 0})
     for case in cases:
+        row = by_reason[case.get("reason_category") or "unknown"]
+        row["count"] += 1
         if _naive_recovers(case):
             recovered_count += 1
             recovered_value += float(case.get("amount") or 0)
+            row["recovered_count"] += 1
     return {
         "recovered_count": recovered_count,
         "recovered_value": recovered_value,
         "total_count": len(cases),
         "at_risk_value": sum(float(c.get("amount") or 0) for c in cases),
+        "by_reason": dict(by_reason),
     }
 
 
