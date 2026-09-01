@@ -50,6 +50,31 @@ def _parse_ts(value: Any) -> datetime | None:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
+def _assert_ceiling_not_exceeded(ceiling_capture: float, recovered_value: float, recoverable_value: float) -> None:
+    """
+    ceiling_capture > 100% is not a policy violation to report and move on
+    from (unlike the Sec 4.3 safety invariants below, which measure whether
+    something the pipeline is supposed to prevent actually happened) -- it's
+    a mathematical impossibility given correct bookkeeping: recovered cases
+    are by definition a subset of the recoverable ones, so recovered_value
+    can never exceed recoverable_value. A violation means either the
+    simulator recovered a case whose latent["recoverable"] was False (see
+    app/detection/batch_scanner.py's _maybe_route_reply and the promise
+    is_paid check -- both must gate on "recoverable" the same way
+    _matches_correct_strategy does), or this module and the ceiling
+    calculation disagree on what they're summing. Either way, raise loudly
+    right where it's computed rather than silently reporting a nonsensical
+    number the dashboard would otherwise just print as-is.
+    """
+    if ceiling_capture > 1.0 + 1e-9:
+        raise ValueError(
+            f"ceiling_capture={ceiling_capture:.4f} exceeds 100%: recovered_value "
+            f"(Rs {recovered_value:,.2f}) is greater than the recoverable ceiling "
+            f"(Rs {recoverable_value:,.2f}). This is impossible by definition and indicates "
+            "a bug upstream, not a real result -- fix the cause, don't suppress this check."
+        )
+
+
 def compute(
     cases: list[dict],
     *,
@@ -108,6 +133,7 @@ def compute(
     ceiling_capture = None
     if ceiling and ceiling.get("recoverable_value"):
         ceiling_capture = recovered_value / ceiling["recoverable_value"]
+        _assert_ceiling_not_exceeded(ceiling_capture, recovered_value, ceiling["recoverable_value"])
 
     by_reason: dict[str, dict] = defaultdict(
         lambda: {"count": 0, "recovered": 0, "amount": 0.0, "recovered_amount": 0.0}

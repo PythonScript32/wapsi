@@ -238,7 +238,14 @@ def run_batch(
     (repository.clear_batch) before ingesting, so a re-run never silently
     skips the flush on a duplicate idempotency/primary key from the prior
     run. Pass False only to deliberately append onto an existing batch.
+
+    Checks repository.verify_schema() before touching anything else, even
+    for persist="memory" -- that mode still bulk-flushes to the real
+    Supabase project at the end, so an unapplied migration is just as fatal
+    to it, only discovered 30 simulated days later instead of immediately.
     """
+    repository.verify_schema()
+
     policy = config.DEFAULT_POLICY
     batch_id = set_name
     started_at = time.perf_counter()
@@ -512,7 +519,11 @@ def _resolve_due_promises(cases: dict[str, dict], clock: SimulatedClock) -> None
     def is_paid(promise: dict) -> bool:
         case = cases.get(promise.get("case_id"))
         latent = (case or {}).get("latent") or {}
-        return bool(latent.get("keeps_promise"))
+        # recoverable=False is the ground-truth ceiling: a case that can
+        # never truly recover keeping its promise anyway (ceiling_capture
+        # must never exceed 100%) would be a self-contradiction in the
+        # synthetic data, not a real outcome.
+        return bool(latent.get("recoverable")) and bool(latent.get("keeps_promise"))
 
     results = tracker.resolve_due_promises(
         clock.now.date().isoformat(), config.DEFAULT_POLICY, is_paid=is_paid, now=clock.now,
@@ -627,7 +638,11 @@ def _maybe_route_reply(case: dict, decision: dict, latent: dict, now: datetime) 
         return False
 
     if intent in ("already_paid", "pay_now"):
-        return True
+        # Same ground-truth ceiling _matches_correct_strategy enforces: a
+        # case that latent says can never actually recover doesn't get to
+        # recover just because the simulated reply claims a payment -- that
+        # would let recovered_value exceed the recoverable ceiling.
+        return bool(latent.get("recoverable"))
 
     if intent == "promise_to_pay":
         # tracker.record_promise applies the horizon cap itself (FR-D5); pass

@@ -182,6 +182,15 @@ def no_snapshot_file(monkeypatch):
     return written
 
 
+@pytest.fixture(autouse=True)
+def no_schema_check(monkeypatch):
+    """run_batch() calls repository.verify_schema() first thing, which hits
+    the real Supabase client -- these tests never touch the network, real
+    schema state included. Schema-check behavior itself is covered directly
+    in tests/test_repository.py."""
+    monkeypatch.setattr(repository_module, "verify_schema", lambda: None)
+
+
 def make_case(**overrides) -> dict:
     case = {
         "id": "case_test000001",
@@ -347,6 +356,57 @@ def test_already_paid_and_pay_now_recover_immediately(intent):
     assert bs._maybe_route_reply(case, decision, latent, NOW) is True
 
 
+@pytest.mark.parametrize("intent", ["already_paid", "pay_now"])
+def test_already_paid_and_pay_now_do_not_recover_a_case_that_is_not_latent_recoverable(intent):
+    """Regression guard: ceiling_capture (recovered_value / recoverable
+    ceiling) can never exceed 100% because recovered cases are a subset of
+    the recoverable ones -- a customer reply must not be able to recover a
+    case latent says can never actually recover, the same ground truth
+    _matches_correct_strategy already enforces for the retry path."""
+    case = make_case()
+    latent = {**case["latent"], "recoverable": False, "responds_to_outreach": True, "reply_intent": intent}
+    decision = make_decision(intervention="send_link")
+    assert bs._maybe_route_reply(case, decision, latent, NOW) is False
+
+
+def test_resolve_due_promises_does_not_recover_a_kept_promise_that_is_not_latent_recoverable(fake_repo):
+    """Same ceiling regression as the already_paid/pay_now case above, for
+    the promise-kept path: a case latent says can never actually recover
+    must not be recovered just because it also (independently) keeps a
+    promise in the synthetic data."""
+    case = make_case(id="case_np1", amount=499.0)
+    case["latent"] = {**case["latent"], "recoverable": False, "keeps_promise": True}
+    cases = {"case_np1": case}
+    fake_repo.insert_promise({
+        "case_id": "case_np1", "promised_amount": 499.0,
+        "promised_date": NOW.date().isoformat(), "status": "pending", "source": "text",
+    })
+    clock = bs.SimulatedClock(NOW)
+
+    bs._resolve_due_promises(cases, clock)
+
+    assert case["state"] != "RECOVERED"
+    promise = next(iter(fake_repo.promises.values()))
+    assert promise["status"] == "broken"
+
+
+def test_resolve_due_promises_recovers_a_kept_promise_that_is_latent_recoverable(fake_repo):
+    case = make_case(id="case_np2", amount=499.0)
+    case["latent"] = {**case["latent"], "recoverable": True, "keeps_promise": True}
+    cases = {"case_np2": case}
+    fake_repo.insert_promise({
+        "case_id": "case_np2", "promised_amount": 499.0,
+        "promised_date": NOW.date().isoformat(), "status": "pending", "source": "text",
+    })
+    clock = bs.SimulatedClock(NOW)
+
+    bs._resolve_due_promises(cases, clock)
+
+    assert case["state"] == "RECOVERED"
+    promise = next(iter(fake_repo.promises.values()))
+    assert promise["status"] == "kept"
+
+
 def test_promise_to_pay_creates_a_promise_and_returns_false(fake_repo):
     case = make_case()
     latent = {**case["latent"], "responds_to_outreach": True, "reply_intent": "promise_to_pay", "promise_offset_days": 5}
@@ -458,6 +518,22 @@ def test_naive_baseline_lands_in_the_realistic_range_on_the_real_dev_dataset():
     result = bs.naive_baseline("dev")
     rate = result["recovered_count"] / result["total_count"]
     assert 0.12 <= rate <= 0.18
+
+
+def test_run_batch_never_lets_ceiling_capture_exceed_100_percent_on_the_real_dev_dataset(monkeypatch):
+    """Regression guard: recovered cases must be a subset of the recoverable
+    ones (ceiling_capture = recovered_value / recoverable_value can never
+    exceed 1.0). metrics.compute() itself raises loudly if it ever does
+    (see app/metrics/compute.py's _assert_ceiling_not_exceeded) -- a passing
+    run_batch() call here already proves that didn't happen on the real
+    dataset, and the explicit bound below is the actual assertion this test
+    exists to make."""
+    monkeypatch.setattr(repository_module, "bulk_insert", lambda table, rows, chunk_size=500: len(rows))
+
+    result = bs.run_batch("dev", now=NOW, persist="memory")
+
+    assert result["ceiling_capture"] is not None
+    assert result["ceiling_capture"] <= 1.0
 
 
 # ---------------------------------------------------------------------------

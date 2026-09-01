@@ -7,6 +7,8 @@ the check actually detects it rather than being asserted away.
 """
 from __future__ import annotations
 
+import pytest
+
 from app.metrics import compute as metrics
 
 POLICY = {
@@ -55,6 +57,43 @@ def test_compute_works_with_no_optional_data_at_all():
     assert result["post_opt_out_contacts"] == 0
     assert result["actions_without_audit"] == 0
     assert result["over_cap_discounts"] == 0
+
+
+# ---------------------------------------------------------------------------
+# ceiling_capture -- recovered_value can never exceed the recoverable ceiling
+# ---------------------------------------------------------------------------
+
+def test_ceiling_capture_is_none_with_no_ceiling_supplied():
+    result = metrics.compute([make_case()])
+    assert result["ceiling_capture"] is None
+
+
+def test_ceiling_capture_computes_normally_within_bounds():
+    cases = [make_case(recovered_amount=250.0)]
+    ceiling = {"recoverable_count": 1, "recoverable_value": 500.0}
+    result = metrics.compute(cases, ceiling=ceiling)
+    assert result["ceiling_capture"] == 0.5
+
+
+def test_ceiling_capture_at_exactly_100_percent_does_not_raise():
+    cases = [make_case(amount=500.0, recovered_amount=500.0)]
+    ceiling = {"recoverable_count": 1, "recoverable_value": 500.0}
+    result = metrics.compute(cases, ceiling=ceiling)
+    assert result["ceiling_capture"] == pytest.approx(1.0)
+
+
+def test_ceiling_capture_above_100_percent_raises():
+    """This is a mathematical impossibility, not a policy violation to report
+    and move past: recovered cases are by definition a subset of the
+    recoverable ones. A caller that lets recovered_value exceed the
+    recoverable ceiling (e.g. batch_scanner recovering a case whose
+    latent["recoverable"] was False) has a real bug, and compute() must fail
+    loudly right where it's computed instead of reporting a nonsensical
+    number."""
+    cases = [make_case(amount=600.0, recovered_amount=600.0)]
+    ceiling = {"recoverable_count": 1, "recoverable_value": 500.0}
+    with pytest.raises(ValueError, match="exceeds 100%"):
+        metrics.compute(cases, ceiling=ceiling)
 
 
 # ---------------------------------------------------------------------------

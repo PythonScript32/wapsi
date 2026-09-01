@@ -254,6 +254,53 @@ def _pre_debit_notice_at(case_id: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# schema verification -- catches an unapplied migration loudly, before a
+# batch run silently flushes 0 rows for the affected table
+# ---------------------------------------------------------------------------
+
+# table -> {column: migration file that adds it}. Extend this whenever a new
+# migration adds a column app/detection/batch_scanner.py's pipeline writes.
+_EXPECTED_COLUMNS: dict[str, dict[str, str]] = {
+    "promises": {"source": "supabase/migrations/002_promise_source.sql"},
+}
+
+
+def verify_schema() -> None:
+    """
+    Probe every column _EXPECTED_COLUMNS lists for real presence in this
+    Supabase project's schema, and fail loudly -- naming the migration file
+    to run -- if any is missing.
+
+    WHY THIS EXISTS: an unapplied migration does not fail at connect time.
+    PostgREST returns PGRST204 ("column not found in the schema cache") on
+    the first insert/select that actually touches the missing column. For a
+    column only ever written by INSERT (e.g. promises.source), that means
+    every insert into that table fails from the very first row -- and
+    bulk_insert() (see below) treats that as a transient error, retries,
+    gives up, and logs a WARNING per chunk. The batch still finishes and
+    prints a summary; a scrolling log is exactly the place a "0/1 chunks
+    succeeded" line goes unnoticed. Calling this once at the start of
+    app.detection.batch_scanner.run_batch() turns a silent 0-row flush into
+    an immediate, unmissable failure instead.
+    """
+    client = get_client()
+    missing: list[str] = []
+    for table, columns in _EXPECTED_COLUMNS.items():
+        for column, migration in columns.items():
+            try:
+                client.table(table).select(column).limit(0).execute()
+            except Exception as exc:
+                missing.append(f'"{table}.{column}" -- run {migration} ({exc})')
+
+    if missing:
+        raise RuntimeError(
+            "Database schema is out of date -- migration(s) not yet applied to this "
+            "Supabase project:\n  " + "\n  ".join(missing) +
+            "\nRun the SQL in Supabase Studio -> SQL Editor, then retry."
+        )
+
+
+# ---------------------------------------------------------------------------
 # batch helpers
 # ---------------------------------------------------------------------------
 
