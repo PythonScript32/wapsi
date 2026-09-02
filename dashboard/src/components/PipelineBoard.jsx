@@ -4,6 +4,7 @@ import { supabase, subscribeToCases } from '../lib/supabase'
 import { CASE_STATES, TERMINAL_STATES, stateLabel, stateTone } from '../lib/caseStates'
 import { formatINR, formatPct } from '../lib/format'
 import { toneClasses } from '../lib/tones'
+import { useBatch } from '../lib/batchContext'
 import StatCard from './StatCard'
 import CaseCard from './CaseCard'
 
@@ -17,6 +18,7 @@ const CASE_COLUMNS = 'id, customer_ref, amount, reason_category, state, recovere
 const HIGHLIGHT_MS = 1500
 
 export default function PipelineBoard() {
+  const { batchId, batch } = useBatch()
   const [cases, setCases] = useState(null) // null = initial fetch still in flight
   const [error, setError] = useState(null)
   const [justMoved, setJustMoved] = useState(() => new Set())
@@ -24,6 +26,11 @@ export default function PipelineBoard() {
 
   useEffect(() => {
     let cancelled = false
+    // Switching batches starts a fresh board -- stale rows from the other
+    // batch must not linger while the new one loads.
+    casesById.current = new Map()
+    setCases(null)
+    setError(null)
     // Rows a Realtime event has already delivered before the initial fetch
     // resolves -- the fetch must not clobber those with a now-stale read.
     const seenViaRealtime = new Set()
@@ -39,7 +46,7 @@ export default function PipelineBoard() {
       }, HIGHLIGHT_MS)
     }
 
-    const channel = subscribeToCases((payload) => {
+    const channel = subscribeToCases(batchId, (payload) => {
       const { eventType, new: newRow, old: oldRow } = payload
 
       if (eventType === 'DELETE') {
@@ -59,6 +66,7 @@ export default function PipelineBoard() {
       const { data, error: fetchError } = await supabase
         .from('cases')
         .select(CASE_COLUMNS)
+        .eq('batch_id', batchId)
         .order('updated_at', { ascending: false })
         .limit(1000)
 
@@ -78,7 +86,7 @@ export default function PipelineBoard() {
       cancelled = true
       supabase.removeChannel(channel)
     }
-  }, [])
+  }, [batchId])
 
   const stats = useMemo(() => {
     if (!cases) return null
@@ -113,6 +121,10 @@ export default function PipelineBoard() {
 
   return (
     <div className="flex flex-col gap-6">
+      <h2 className="text-sm font-semibold uppercase tracking-wide text-muted">
+        Batch · {batch.label}
+      </h2>
+
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <StatCard
           label="₹ At Risk" tone="atrisk" icon={Wallet} loading={!cases}

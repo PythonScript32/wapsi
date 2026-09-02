@@ -1,26 +1,27 @@
 import { useEffect, useState } from 'react'
 import { fetchBatchResults } from '../lib/metricsApi'
+import { useBatch } from '../lib/batchContext'
 import HeadlineMetrics from '../components/HeadlineMetrics'
 import SafetyInvariants from '../components/SafetyInvariants'
 import RecoveryByReasonChart from '../components/RecoveryByReasonChart'
 import GateBlockTable from '../components/GateBlockTable'
 import ExceptionList from '../components/ExceptionList'
 
-const SET_NAME = 'dev'
-
 // Screen 3 (PRD §12): headline (lift is the hero number), safety invariants,
 // recovery-by-reason vs naive, gate-block table, exception list. Reads
 // data/results_{set}.json verbatim (via the FastAPI backend's
-// GET /batch/results) -- every number here comes straight from
-// app/metrics/compute()'s own output, never recomputed in the browser.
+// GET /batch/results) for whichever batch is selected in the header -- every
+// number here comes straight from app/metrics/compute()'s own output, never
+// recomputed in the browser, so it matches that batch's CLI summary exactly.
 export default function MetricsPage() {
+  const { batchId, batch } = useBatch()
   const [state, setState] = useState({ status: 'loading' })
 
   useEffect(() => {
     let cancelled = false
     setState({ status: 'loading' })
 
-    fetchBatchResults(SET_NAME)
+    fetchBatchResults(batchId)
       .then((data) => {
         if (!cancelled) setState({ status: 'ready', data })
       })
@@ -31,10 +32,10 @@ export default function MetricsPage() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [batchId])
 
   if (state.status === 'loading') return <LoadingState />
-  if (state.status === 'error') return <ErrorState message={state.message} />
+  if (state.status === 'error') return <ErrorState batch={batch} message={state.message} />
 
   const { data } = state
 
@@ -42,7 +43,7 @@ export default function MetricsPage() {
     <div className="flex flex-col gap-8">
       <div>
         <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-muted">
-          Batch results · {SET_NAME}
+          {batch.description}
         </h2>
         <HeadlineMetrics data={data} />
       </div>
@@ -85,13 +86,13 @@ function LoadingState() {
   )
 }
 
-function ErrorState({ message }) {
+function ErrorState({ batch, message }) {
   return (
     <div className="rounded-lg border border-lost/30 bg-lost/10 p-6 text-sm text-lost">
       <p className="font-medium">Couldn&apos;t load batch results: {message}</p>
       <p className="mt-2 text-muted">
         Make sure the backend is running (<code className="font-mono text-xs">uvicorn app.main:app --reload --port 8000</code>)
-        and a batch has been run (<code className="font-mono text-xs">python -m app.detection.batch_scanner --set {SET_NAME}</code>).
+        and a batch has been run (<code className="font-mono text-xs">python -m app.detection.batch_scanner --set {batch.id}</code>).
       </p>
     </div>
   )
