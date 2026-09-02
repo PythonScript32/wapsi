@@ -1,0 +1,1244 @@
+{
+  "total_cases": 300,
+  "at_risk_value": 183840.0,
+  "recovered_count": 144,
+  "recovered_value": 82126.0,
+  "recovery_rate_count": 0.48,
+  "recovery_rate_value": 0.44672541340295907,
+  "naive": {
+    "recovered_count": 47,
+    "recovered_value": 32873.0,
+    "total_count": 300,
+    "at_risk_value": 183840.0,
+    "by_reason": {
+      "insufficient_funds": {
+        "count": 142,
+        "recovered_count": 37
+      },
+      "bank_downtime": {
+        "count": 35,
+        "recovered_count": 0
+      },
+      "mandate_revoked": {
+        "count": 23,
+        "recovered_count": 0
+      },
+      "checkout_dropoff": {
+        "count": 61,
+        "recovered_count": 0
+      },
+      "expired_card": {
+        "count": 21,
+        "recovered_count": 0
+      },
+      "technical_other": {
+        "count": 18,
+        "recovered_count": 10
+      }
+    }
+  },
+  "naive_recovery_rate_count": 0.15666666666666668,
+  "recovery_lift": 2.063829787234042,
+  "ceiling": {
+    "recoverable_count": 177,
+    "recoverable_value": 103523.0
+  },
+  "ceiling_capture": 0.793311631231707,
+  "recovery_by_reason": {
+    "insufficient_funds": {
+      "count": 142,
+      "recovered": 75,
+      "amount": 91518.0,
+      "recovered_amount": 48365.0,
+      "rate": 0.528169014084507,
+      "naive_count": 142,
+      "naive_recovered": 37,
+      "naive_rate": 0.2605633802816901
+    },
+    "bank_downtime": {
+      "count": 35,
+      "recovered": 32,
+      "amount": 21465.0,
+      "recovered_amount": 19018.0,
+      "rate": 0.9142857142857143,
+      "naive_count": 35,
+      "naive_recovered": 0,
+      "naive_rate": 0.0
+    },
+    "mandate_revoked": {
+      "count": 23,
+      "recovered": 8,
+      "amount": 9767.0,
+      "recovered_amount": 1482.0,
+      "rate": 0.34782608695652173,
+      "naive_count": 23,
+      "naive_recovered": 0,
+      "naive_rate": 0.0
+    },
+    "checkout_dropoff": {
+      "count": 61,
+      "recovered": 14,
+      "amount": 35189.0,
+      "recovered_amount": 7916.0,
+      "rate": 0.22950819672131148,
+      "naive_count": 61,
+      "naive_recovered": 0,
+      "naive_rate": 0.0
+    },
+    "expired_card": {
+      "count": 21,
+      "recovered": 5,
+      "amount": 18989.0,
+      "recovered_amount": 2275.0,
+      "rate": 0.23809523809523808,
+      "naive_count": 21,
+      "naive_recovered": 0,
+      "naive_rate": 0.0
+    },
+    "technical_other": {
+      "count": 18,
+      "recovered": 10,
+      "amount": 6912.0,
+      "recovered_amount": 3070.0,
+      "rate": 0.5555555555555556,
+      "naive_count": 18,
+      "naive_recovered": 10,
+      "naive_rate": 0.5555555555555556
+    }
+  },
+  "gate_block_counts": {
+    "G10": 220,
+    "G2": 14,
+    "G3": 44,
+    "G5": 59
+  },
+  "exception_list": [
+    {
+      "case_id": "case_27d5597bfde0",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 99.0,
+      "attempts_made": 9
+    },
+    {
+      "case_id": "case_3eedfd0e4b70",
+      "reason_category": "insufficient_funds",
+      "state": "ESCALATED",
+      "amount": 249.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_fd96401ddd80",
+      "reason_category": "checkout_dropoff",
+      "state": "CLOSED_LOST",
+      "amount": 129.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_1e30a0afbc98",
+      "reason_category": "insufficient_funds",
+      "state": "ESCALATED",
+      "amount": 599.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_80c32cfba923",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 999.0,
+      "attempts_made": 6
+    },
+    {
+      "case_id": "case_3673aaccb174",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 199.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_ae7bcdeb5715",
+      "reason_category": "checkout_dropoff",
+      "state": "ESCALATED",
+      "amount": 599.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_d261060bffa2",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 1499.0,
+      "attempts_made": 6
+    },
+    {
+      "case_id": "case_8f9d323edbdd",
+      "reason_category": "expired_card",
+      "state": "CLOSED_LOST",
+      "amount": 499.0,
+      "attempts_made": 7
+    },
+    {
+      "case_id": "case_4f41c2e559f8",
+      "reason_category": "expired_card",
+      "state": "CLOSED_LOST",
+      "amount": 999.0,
+      "attempts_made": 6
+    },
+    {
+      "case_id": "case_e2b08e105da0",
+      "reason_category": "expired_card",
+      "state": "CLOSED_LOST",
+      "amount": 1999.0,
+      "attempts_made": 6
+    },
+    {
+      "case_id": "case_21694fd9a153",
+      "reason_category": "mandate_revoked",
+      "state": "CLOSED_LOST",
+      "amount": 99.0,
+      "attempts_made": 7
+    },
+    {
+      "case_id": "case_6c8e925d4b7c",
+      "reason_category": "checkout_dropoff",
+      "state": "CLOSED_LOST",
+      "amount": 149.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_e465ad033f46",
+      "reason_category": "bank_downtime",
+      "state": "ESCALATED",
+      "amount": 1999.0,
+      "attempts_made": 3
+    },
+    {
+      "case_id": "case_758c1859db36",
+      "reason_category": "insufficient_funds",
+      "state": "ESCALATED",
+      "amount": 129.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_c9c2a08a10d7",
+      "reason_category": "checkout_dropoff",
+      "state": "CLOSED_LOST",
+      "amount": 299.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_a89bf282fab4",
+      "reason_category": "checkout_dropoff",
+      "state": "ESCALATED",
+      "amount": 249.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_8ffcf0d79e21",
+      "reason_category": "expired_card",
+      "state": "CLOSED_LOST",
+      "amount": 99.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_a1932fe7fb36",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 1999.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_348b592524f6",
+      "reason_category": "checkout_dropoff",
+      "state": "CLOSED_LOST",
+      "amount": 1499.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_27cfa00b1773",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 499.0,
+      "attempts_made": 8
+    },
+    {
+      "case_id": "case_a25831f9ad27",
+      "reason_category": "insufficient_funds",
+      "state": "ESCALATED",
+      "amount": 399.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_684873828f6d",
+      "reason_category": "checkout_dropoff",
+      "state": "CLOSED_LOST",
+      "amount": 1499.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_eccd04bb1b48",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 129.0,
+      "attempts_made": 8
+    },
+    {
+      "case_id": "case_f9415bfa234e",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 999.0,
+      "attempts_made": 7
+    },
+    {
+      "case_id": "case_1dab6c4429da",
+      "reason_category": "checkout_dropoff",
+      "state": "CLOSED_LOST",
+      "amount": 299.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_45050c8d1043",
+      "reason_category": "checkout_dropoff",
+      "state": "ESCALATED",
+      "amount": 99.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_5dd6f7296ffc",
+      "reason_category": "expired_card",
+      "state": "CLOSED_LOST",
+      "amount": 1499.0,
+      "attempts_made": 8
+    },
+    {
+      "case_id": "case_36450cdf05bf",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 1499.0,
+      "attempts_made": 6
+    },
+    {
+      "case_id": "case_0bd4a1752416",
+      "reason_category": "expired_card",
+      "state": "CLOSED_LOST",
+      "amount": 299.0,
+      "attempts_made": 7
+    },
+    {
+      "case_id": "case_22b70d381f43",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 249.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_9bb277d305f9",
+      "reason_category": "expired_card",
+      "state": "CLOSED_LOST",
+      "amount": 1499.0,
+      "attempts_made": 8
+    },
+    {
+      "case_id": "case_faf87e559d14",
+      "reason_category": "insufficient_funds",
+      "state": "ESCALATED",
+      "amount": 299.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_15265c01899e",
+      "reason_category": "expired_card",
+      "state": "CLOSED_LOST",
+      "amount": 999.0,
+      "attempts_made": 8
+    },
+    {
+      "case_id": "case_5041d5add628",
+      "reason_category": "mandate_revoked",
+      "state": "CLOSED_LOST",
+      "amount": 599.0,
+      "attempts_made": 6
+    },
+    {
+      "case_id": "case_e3462af4be53",
+      "reason_category": "checkout_dropoff",
+      "state": "ESCALATED",
+      "amount": 999.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_63756415b381",
+      "reason_category": "insufficient_funds",
+      "state": "ESCALATED",
+      "amount": 149.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_1465d9f1a8a6",
+      "reason_category": "checkout_dropoff",
+      "state": "CLOSED_LOST",
+      "amount": 599.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_197e7370712d",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 299.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_67d783d99e11",
+      "reason_category": "checkout_dropoff",
+      "state": "CLOSED_LOST",
+      "amount": 999.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_ec1ee990bfe2",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 129.0,
+      "attempts_made": 8
+    },
+    {
+      "case_id": "case_dd4d66b9ee00",
+      "reason_category": "checkout_dropoff",
+      "state": "CLOSED_LOST",
+      "amount": 599.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_3c20dce10adb",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 999.0,
+      "attempts_made": 8
+    },
+    {
+      "case_id": "case_d9da97ba4e26",
+      "reason_category": "checkout_dropoff",
+      "state": "CLOSED_LOST",
+      "amount": 99.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_1ea9e1d9954f",
+      "reason_category": "checkout_dropoff",
+      "state": "CLOSED_LOST",
+      "amount": 149.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_6065e04f1306",
+      "reason_category": "insufficient_funds",
+      "state": "ESCALATED",
+      "amount": 149.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_7083fc01a5f9",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 249.0,
+      "attempts_made": 7
+    },
+    {
+      "case_id": "case_c072eef59398",
+      "reason_category": "checkout_dropoff",
+      "state": "ESCALATED",
+      "amount": 1999.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_1b161aa16d09",
+      "reason_category": "checkout_dropoff",
+      "state": "CLOSED_LOST",
+      "amount": 1499.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_e41c59990b21",
+      "reason_category": "mandate_revoked",
+      "state": "CLOSED_LOST",
+      "amount": 299.0,
+      "attempts_made": 8
+    },
+    {
+      "case_id": "case_3eb8bd213af8",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 499.0,
+      "attempts_made": 8
+    },
+    {
+      "case_id": "case_aac5490800e3",
+      "reason_category": "mandate_revoked",
+      "state": "ESCALATED",
+      "amount": 399.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_8b4ac4432186",
+      "reason_category": "checkout_dropoff",
+      "state": "ESCALATED",
+      "amount": 129.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_e8107a506ca3",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 799.0,
+      "attempts_made": 9
+    },
+    {
+      "case_id": "case_3dfa285db3dc",
+      "reason_category": "mandate_revoked",
+      "state": "CLOSED_LOST",
+      "amount": 499.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_0cafa0310e3d",
+      "reason_category": "insufficient_funds",
+      "state": "ESCALATED",
+      "amount": 399.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_d76d7d062bf2",
+      "reason_category": "mandate_revoked",
+      "state": "ESCALATED",
+      "amount": 499.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_4e7da14dc04e",
+      "reason_category": "insufficient_funds",
+      "state": "ESCALATED",
+      "amount": 99.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_ad6e53d31b09",
+      "reason_category": "mandate_revoked",
+      "state": "CLOSED_LOST",
+      "amount": 249.0,
+      "attempts_made": 7
+    },
+    {
+      "case_id": "case_36a83a6280ee",
+      "reason_category": "checkout_dropoff",
+      "state": "CLOSED_LOST",
+      "amount": 399.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_f3ea654316cb",
+      "reason_category": "insufficient_funds",
+      "state": "ESCALATED",
+      "amount": 299.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_2d14ee2d5cb0",
+      "reason_category": "checkout_dropoff",
+      "state": "CLOSED_LOST",
+      "amount": 129.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_06734409cc90",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 199.0,
+      "attempts_made": 6
+    },
+    {
+      "case_id": "case_21a1744bf556",
+      "reason_category": "checkout_dropoff",
+      "state": "CLOSED_LOST",
+      "amount": 799.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_0d121b7d08ed",
+      "reason_category": "expired_card",
+      "state": "CLOSED_LOST",
+      "amount": 799.0,
+      "attempts_made": 8
+    },
+    {
+      "case_id": "case_204317e542ba",
+      "reason_category": "insufficient_funds",
+      "state": "ESCALATED",
+      "amount": 799.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_81d597e15e0c",
+      "reason_category": "checkout_dropoff",
+      "state": "CLOSED_LOST",
+      "amount": 299.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_ee10f0f31fa9",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 149.0,
+      "attempts_made": 7
+    },
+    {
+      "case_id": "case_f5b48b725afa",
+      "reason_category": "mandate_revoked",
+      "state": "CLOSED_LOST",
+      "amount": 199.0,
+      "attempts_made": 7
+    },
+    {
+      "case_id": "case_371457c51d91",
+      "reason_category": "technical_other",
+      "state": "ESCALATED",
+      "amount": 249.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_49f00924ce2c",
+      "reason_category": "mandate_revoked",
+      "state": "CLOSED_LOST",
+      "amount": 199.0,
+      "attempts_made": 6
+    },
+    {
+      "case_id": "case_3530f0226014",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 299.0,
+      "attempts_made": 8
+    },
+    {
+      "case_id": "case_919aba752e70",
+      "reason_category": "technical_other",
+      "state": "ESCALATED",
+      "amount": 299.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_c301299d8d27",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 199.0,
+      "attempts_made": 7
+    },
+    {
+      "case_id": "case_e61adda1e461",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 1999.0,
+      "attempts_made": 9
+    },
+    {
+      "case_id": "case_1cf0ad122743",
+      "reason_category": "insufficient_funds",
+      "state": "ESCALATED",
+      "amount": 149.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_ea74c9578dae",
+      "reason_category": "insufficient_funds",
+      "state": "ESCALATED",
+      "amount": 499.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_34eb809b3dc4",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 1499.0,
+      "attempts_made": 7
+    },
+    {
+      "case_id": "case_df43efb74a11",
+      "reason_category": "checkout_dropoff",
+      "state": "CLOSED_LOST",
+      "amount": 99.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_f6ace51e1aee",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 199.0,
+      "attempts_made": 6
+    },
+    {
+      "case_id": "case_c7e36f9b24da",
+      "reason_category": "mandate_revoked",
+      "state": "ESCALATED",
+      "amount": 1499.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_f57b4e4392d9",
+      "reason_category": "technical_other",
+      "state": "ESCALATED",
+      "amount": 199.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_ce18e5e351e5",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 1499.0,
+      "attempts_made": 6
+    },
+    {
+      "case_id": "case_36798fd69f1a",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 1999.0,
+      "attempts_made": 7
+    },
+    {
+      "case_id": "case_1567f9caff7d",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 149.0,
+      "attempts_made": 8
+    },
+    {
+      "case_id": "case_24164ab1cf84",
+      "reason_category": "insufficient_funds",
+      "state": "ESCALATED",
+      "amount": 249.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_bffb5fd8b965",
+      "reason_category": "insufficient_funds",
+      "state": "ESCALATED",
+      "amount": 199.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_5cf6fde23862",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 149.0,
+      "attempts_made": 9
+    },
+    {
+      "case_id": "case_3239a2bf1cc4",
+      "reason_category": "bank_downtime",
+      "state": "ESCALATED",
+      "amount": 199.0,
+      "attempts_made": 3
+    },
+    {
+      "case_id": "case_d70f43a384ef",
+      "reason_category": "checkout_dropoff",
+      "state": "CLOSED_LOST",
+      "amount": 499.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_78c091f09f58",
+      "reason_category": "checkout_dropoff",
+      "state": "CLOSED_LOST",
+      "amount": 1999.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_35136fde9679",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 999.0,
+      "attempts_made": 8
+    },
+    {
+      "case_id": "case_6e853e856313",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 199.0,
+      "attempts_made": 6
+    },
+    {
+      "case_id": "case_070e283c341f",
+      "reason_category": "checkout_dropoff",
+      "state": "CLOSED_LOST",
+      "amount": 199.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_9fe039326255",
+      "reason_category": "checkout_dropoff",
+      "state": "ESCALATED",
+      "amount": 149.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_9fd6d9cf02c5",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 799.0,
+      "attempts_made": 6
+    },
+    {
+      "case_id": "case_b882ba1b5410",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 299.0,
+      "attempts_made": 6
+    },
+    {
+      "case_id": "case_f114212b42b3",
+      "reason_category": "technical_other",
+      "state": "ESCALATED",
+      "amount": 499.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_16f9fe4d84a2",
+      "reason_category": "checkout_dropoff",
+      "state": "CLOSED_LOST",
+      "amount": 299.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_49698170abe6",
+      "reason_category": "checkout_dropoff",
+      "state": "CLOSED_LOST",
+      "amount": 199.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_f1e0b4139fb8",
+      "reason_category": "checkout_dropoff",
+      "state": "CLOSED_LOST",
+      "amount": 799.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_13829dafc4cb",
+      "reason_category": "mandate_revoked",
+      "state": "CLOSED_LOST",
+      "amount": 399.0,
+      "attempts_made": 6
+    },
+    {
+      "case_id": "case_f848df4817a5",
+      "reason_category": "insufficient_funds",
+      "state": "ESCALATED",
+      "amount": 1999.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_6e41f4166e0b",
+      "reason_category": "checkout_dropoff",
+      "state": "CLOSED_LOST",
+      "amount": 249.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_d0256d319bce",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 129.0,
+      "attempts_made": 6
+    },
+    {
+      "case_id": "case_c3e69740fb4e",
+      "reason_category": "checkout_dropoff",
+      "state": "CLOSED_LOST",
+      "amount": 1499.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_0547478a624a",
+      "reason_category": "technical_other",
+      "state": "ESCALATED",
+      "amount": 599.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_d082bc0e0789",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 249.0,
+      "attempts_made": 6
+    },
+    {
+      "case_id": "case_4fcd887f6398",
+      "reason_category": "checkout_dropoff",
+      "state": "ESCALATED",
+      "amount": 199.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_c7135d0525e6",
+      "reason_category": "insufficient_funds",
+      "state": "ESCALATED",
+      "amount": 599.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_f1de1c7ede62",
+      "reason_category": "checkout_dropoff",
+      "state": "CLOSED_LOST",
+      "amount": 599.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_6d00048a5d5e",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 1999.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_03ba43e8c952",
+      "reason_category": "technical_other",
+      "state": "ESCALATED",
+      "amount": 399.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_83092b032277",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 1999.0,
+      "attempts_made": 6
+    },
+    {
+      "case_id": "case_c78192da1544",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 149.0,
+      "attempts_made": 6
+    },
+    {
+      "case_id": "case_fcade6722666",
+      "reason_category": "checkout_dropoff",
+      "state": "CLOSED_LOST",
+      "amount": 299.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_c378902c4b41",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 149.0,
+      "attempts_made": 7
+    },
+    {
+      "case_id": "case_1fb2aa65cc25",
+      "reason_category": "checkout_dropoff",
+      "state": "CLOSED_LOST",
+      "amount": 999.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_ab16a77e4710",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 99.0,
+      "attempts_made": 6
+    },
+    {
+      "case_id": "case_4cb035d674b9",
+      "reason_category": "technical_other",
+      "state": "ESCALATED",
+      "amount": 799.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_309e4518481a",
+      "reason_category": "checkout_dropoff",
+      "state": "CLOSED_LOST",
+      "amount": 249.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_33060c955e8c",
+      "reason_category": "checkout_dropoff",
+      "state": "ESCALATED",
+      "amount": 999.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_069af0719bc6",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 599.0,
+      "attempts_made": 7
+    },
+    {
+      "case_id": "case_3440ce1c62ee",
+      "reason_category": "checkout_dropoff",
+      "state": "CLOSED_LOST",
+      "amount": 129.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_77bb9f444748",
+      "reason_category": "expired_card",
+      "state": "ESCALATED",
+      "amount": 599.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_02d439a075ff",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 99.0,
+      "attempts_made": 9
+    },
+    {
+      "case_id": "case_85bfdcfdd513",
+      "reason_category": "checkout_dropoff",
+      "state": "ESCALATED",
+      "amount": 199.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_509b8301fae2",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 399.0,
+      "attempts_made": 8
+    },
+    {
+      "case_id": "case_f71d9663e4b6",
+      "reason_category": "insufficient_funds",
+      "state": "ESCALATED",
+      "amount": 499.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_6bfa16a606b1",
+      "reason_category": "expired_card",
+      "state": "CLOSED_LOST",
+      "amount": 1499.0,
+      "attempts_made": 8
+    },
+    {
+      "case_id": "case_21cdadfdfff7",
+      "reason_category": "expired_card",
+      "state": "CLOSED_LOST",
+      "amount": 799.0,
+      "attempts_made": 6
+    },
+    {
+      "case_id": "case_3a76d49e465e",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 599.0,
+      "attempts_made": 7
+    },
+    {
+      "case_id": "case_991c9d5c4ef5",
+      "reason_category": "mandate_revoked",
+      "state": "ESCALATED",
+      "amount": 599.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_90a4e6460a87",
+      "reason_category": "mandate_revoked",
+      "state": "CLOSED_LOST",
+      "amount": 599.0,
+      "attempts_made": 6
+    },
+    {
+      "case_id": "case_f7c347835c0f",
+      "reason_category": "insufficient_funds",
+      "state": "ESCALATED",
+      "amount": 1999.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_84f5b0a4f5e8",
+      "reason_category": "checkout_dropoff",
+      "state": "CLOSED_LOST",
+      "amount": 149.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_b0614b99febf",
+      "reason_category": "insufficient_funds",
+      "state": "ESCALATED",
+      "amount": 399.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_ee0b2a651f12",
+      "reason_category": "insufficient_funds",
+      "state": "ESCALATED",
+      "amount": 999.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_6df01f0246af",
+      "reason_category": "checkout_dropoff",
+      "state": "CLOSED_LOST",
+      "amount": 149.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_12a61749b626",
+      "reason_category": "checkout_dropoff",
+      "state": "CLOSED_LOST",
+      "amount": 1999.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_9b384f59466e",
+      "reason_category": "mandate_revoked",
+      "state": "CLOSED_LOST",
+      "amount": 1999.0,
+      "attempts_made": 7
+    },
+    {
+      "case_id": "case_32b1173e0e83",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 1999.0,
+      "attempts_made": 7
+    },
+    {
+      "case_id": "case_2a46e76e4139",
+      "reason_category": "technical_other",
+      "state": "ESCALATED",
+      "amount": 799.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_d53588ad59aa",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 499.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_cee5ad3e3c59",
+      "reason_category": "checkout_dropoff",
+      "state": "CLOSED_LOST",
+      "amount": 99.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_9c5a88dd72d9",
+      "reason_category": "insufficient_funds",
+      "state": "ESCALATED",
+      "amount": 999.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_5d713dfdd291",
+      "reason_category": "expired_card",
+      "state": "ESCALATED",
+      "amount": 129.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_6b34500752a1",
+      "reason_category": "mandate_revoked",
+      "state": "CLOSED_LOST",
+      "amount": 149.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_c4814586345d",
+      "reason_category": "checkout_dropoff",
+      "state": "ESCALATED",
+      "amount": 99.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_beff5cdb1f79",
+      "reason_category": "expired_card",
+      "state": "CLOSED_LOST",
+      "amount": 1999.0,
+      "attempts_made": 6
+    },
+    {
+      "case_id": "case_42455bf2e227",
+      "reason_category": "insufficient_funds",
+      "state": "CLOSED_LOST",
+      "amount": 249.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_c99f54dff9c1",
+      "reason_category": "expired_card",
+      "state": "CLOSED_LOST",
+      "amount": 999.0,
+      "attempts_made": 8
+    },
+    {
+      "case_id": "case_6e327bbb53b9",
+      "reason_category": "expired_card",
+      "state": "CLOSED_LOST",
+      "amount": 1999.0,
+      "attempts_made": 1
+    },
+    {
+      "case_id": "case_da875c58a4b0",
+      "reason_category": "checkout_dropoff",
+      "state": "CLOSED_LOST",
+      "amount": 1499.0,
+      "attempts_made": 2
+    },
+    {
+      "case_id": "case_92fa7f01a3aa",
+      "reason_category": "bank_downtime",
+      "state": "ESCALATED",
+      "amount": 249.0,
+      "attempts_made": 3
+    },
+    {
+      "case_id": "case_24fa64206af5",
+      "reason_category": "checkout_dropoff",
+      "state": "CLOSED_LOST",
+      "amount": 99.0,
+      "attempts_made": 1
+    }
+  ],
+  "kept_promise_rate": 0.32075471698113206,
+  "kept_promise_kept_count": 17,
+  "kept_promise_resolved_count": 53,
+  "false_escalation_rate": 0.0,
+  "avg_time_to_recovery_days": 9.387708220416666,
+  "interventions_per_recovery": 5.659722222222222,
+  "cost_per_recovered_rupee": 0.0028212746267929764,
+  "contact_efficiency": 0.2013986013986014,
+  "double_charge_incidents": 0,
+  "post_opt_out_contacts": 0,
+  "actions_without_audit": 0,
+  "over_cap_discounts": 0,
+  "worst_three_reasons": [
+    {
+      "reason_category": "checkout_dropoff",
+      "count": 61,
+      "recovery_rate": 0.22950819672131148,
+      "rupees_lost": 27273.0,
+      "dominant_failure_mode": "G3"
+    },
+    {
+      "reason_category": "expired_card",
+      "count": 21,
+      "recovery_rate": 0.23809523809523808,
+      "rupees_lost": 16714.0,
+      "dominant_failure_mode": "G5"
+    },
+    {
+      "reason_category": "mandate_revoked",
+      "count": 23,
+      "recovery_rate": 0.34782608695652173,
+      "rupees_lost": 8285.0,
+      "dominant_failure_mode": "G5"
+    }
+  ]
+}

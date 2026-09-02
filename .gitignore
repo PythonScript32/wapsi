@@ -14,9 +14,15 @@ dashboard/.env
 node_modules/
 dashboard/dist/
 
-# Data (generated + snapshots)
-data/*.json
+# Data (generated + snapshots) — keep the four checked-in reference/result
+# files the deployed dashboard needs; ignore everything else generated here
+# (wapsi.db, ad-hoc results_*.json from other batch runs, etc.)
+data/*
 !data/.gitkeep
+!data/cases_dev.json
+!data/cases_holdout.json
+!data/results_dev.json
+!data/results_holdout.json
 
 # OS / editor
 .DS_Store
