@@ -1,9 +1,17 @@
 # वापसी · Wapsi
 
-> **Revenue Recovery Agent** — finds money that's slipping away, works out why,
-> and wins it back. Every money action explainable, bounded, gated, and logged.
+AI revenue recovery agent for Indian UPI AutoPay failures and checkout
+drop-offs — it finds money slipping away, works out why, and wins it back,
+with every action explainable, bounded, and logged.
+
+### 48.0% recovered · +206.4% lift over the naive baseline · 0 double-charges
+
+Measured on 300 held-out cases (seed `20260905`), run exactly once and never
+tuned against.
 
 Built for the **Razorpay AI Buildathon · Track 3 (AI Revenue Recovery)**.
+
+**[Live dashboard](#)** *(deploying — Vercel URL to come)* · **[Demo video](#)** *(to come)* · **[Repository](https://github.com/PythonScript32/wapsi)**
 
 ---
 
@@ -20,36 +28,28 @@ mandate issues. Most of those customers never chose to leave — that's
 10%, while WhatsApp plus a UPI link recovers roughly 3× more.
 
 The gap between money lost and money recoverable — with the right timing, in the
-right language — is what वापसी closes.
+right language — is what वापसी closed.
 
-## What it does
+## What it did
 
-**Two sensors → one brain → two layers → one ledger.**
-
-- **Recurring-debit recovery** — catches failed subscription/AutoPay debits,
-  diagnoses the reason, and retries *intelligently*: insufficient funds waits for
-  salary day, bank downtime backs off, a revoked mandate is never silently
-  charged.
-- **Checkout drop-off recovery** — nudges abandoned checkouts, then a bounded
-  offer only if the nudge fails.
-- **Hinglish voice concierge** — customers reply by voice note ("abhi paise
-  nahi, agle hafte kar dunga") and the agent understands; reminders go out in
+- **Recurring-debit recovery** — caught failed subscription/AutoPay debits,
+  diagnosed the reason, and retried *intelligently*: insufficient funds waited
+  for salary day, bank downtime backed off, a revoked mandate was never
+  silently charged.
+- **Checkout drop-off recovery** — nudged abandoned checkouts, then made a
+  bounded offer only if the nudge failed.
+- **Hinglish voice concierge** — customers replied by voice note ("abhi paise
+  nahi, agle hafte kar dunga") and the agent understood; reminders went out in
   Hinglish voice too.
-- **Promise-to-pay tracking** — logs the promise, pauses other outreach,
-  schedules the retry for that date, follows through, and reports kept-promise
-  rate.
+- **Promise-to-pay tracking** — logged the promise, paused other outreach,
+  scheduled the retry for that date, followed through, and reported a
+  kept-promise rate.
 
-## Why it's safe
+![Pipeline board — live kanban of every case by stage](docs/screenshots/pipeline.png)
 
-Every money action passes a **governance gate** before it fires — bounded by max
-attempts, discount caps, exposure limits, a 24h contact gap, grace periods, and
-an RBI-style pre-debit notice. Anything it can't evaluate, it blocks.
+![Case audit trail — every decision, plain-language reasoning, and rupee](docs/screenshots/case-detail.png)
 
-Every decision is written to an **append-only audit log** with plain-language
-reasoning, enforced at the database level. You can read one case top to bottom
-and understand every rupee that moved, and why.
-
-## Architecture
+## How it worked
 
 ```mermaid
 flowchart LR
@@ -70,32 +70,10 @@ flowchart LR
     CS --> M[Metrics<br/>+ exception list]
 ```
 
-## Tech stack
-
-| Layer | Choice |
-| --- | --- |
-| Backend | Python 3.11 · FastAPI · APScheduler |
-| Database | Supabase (Postgres) — Realtime + append-only audit trigger |
-| Payments | Razorpay test-mode APIs + webhooks |
-| Agent brain | Gemini Flash (free tier) |
-| Voice | Gemini (inbound Hinglish) · ElevenLabs (outbound) |
-| Dashboard | React · Vite · Tailwind · Recharts |
-
-## Quickstart
-
-Full walkthrough in [`SETUP.md`](SETUP.md). Short version:
-
-```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env                        # add Razorpay + Supabase + Gemini keys
-
-# run supabase/migrations/001_initial_schema.sql in Supabase → SQL Editor
-python -m app.detection.synthetic_data      # dev (100) + holdout (300) sets
-
-uvicorn app.main:app --reload --port 8000   # backend
-cd dashboard && npm install && npm run dev  # dashboard → :5173
-```
+Two sensors fed one brain, which worked through two layers, into one ledger.
+The decision engine proposed an action; the governance gate authorised or
+blocked it. Every decision — allowed or blocked — was written to the ledger
+with its reasoning.
 
 ## Results
 
@@ -165,24 +143,52 @@ something to over-read either.
 - Customer responses, drawn from a hidden ground-truth model the pipeline never
   reads. Only the outcome simulator sees it — the agent decides blind.
 
-## Repo map
+## Engineering highlights
 
+- **Governance gate enforcing 10 bounds (G1–G10) at the authorising layer** —
+  not advisory. On the holdout run alone it fired 220 promise-to-pay pauses
+  (G10), 59 grace-period closes (G5), 44 per-reason attempt caps (G3), and 14
+  permanent opt-outs (G2): counts pulled straight from the data, proving the
+  gate actually binds rather than logging and letting everything through.
+- **Append-only audit log enforced by a Postgres trigger** (`trg_audit_no_update`)
+  — the database itself rejects any `UPDATE`/`DELETE` on `audit_log`, not just
+  an application-layer convention.
+- **Idempotency as a UNIQUE database constraint**, not application logic — a
+  double-charge on the same payment attempt is structurally impossible, not
+  merely checked for.
+- **Four safety invariants computed from data, all zero**: double-charge
+  incidents, post-opt-out contacts, actions without an audit row, over-cap
+  discounts — every one `0` across 300 held-out cases.
+- **497 tests passing.**
+- **Held-out set run exactly once**, after every other change in this repo was
+  finalized, and never tuned against.
+- **Date-stability tests** — batch runs are driven by an injectable clock
+  (`SimulatedClock`), never wall-clock time, so a run produces the same result
+  whichever day it's executed.
+- **Real Razorpay test-mode integration** — real HTTP calls, real payment link
+  IDs, real webhook signature verification.
+- **Hinglish voice tested on real recorded audio**, not synthetic text
+  fixtures.
+
+## Run it yourself
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+cp .env.example .env                       # add Razorpay + Supabase + Gemini keys
+# run supabase/migrations/001_initial_schema.sql in the Supabase SQL Editor
+python -m app.detection.synthetic_data     # writes the dev (100) + holdout (300) sets
+uvicorn app.main:app --reload --port 8000  # backend
+cd dashboard && npm install && npm run dev # dashboard -> :5173
 ```
-app/          agent pipeline (detection · diagnosis · decision · governance ·
-              execution · voice · promises · scheduler · audit · metrics)
-dashboard/    React dashboard (pipeline · case detail · metrics)
-supabase/     Postgres schema + RLS + realtime
-data/         generated datasets (gitignored)
-tests/        governance + diagnosis tests
-```
 
-## Docs
+Full walkthrough — accounts, installs, git, tooling — in [`SETUP.md`](SETUP.md).
 
-| File | What's in it |
-| --- | --- |
-| [`SETUP.md`](SETUP.md) | Zero-to-running: accounts, installs, git, tooling |
-| [`PRD.md`](PRD.md) | Requirements, metrics, edge cases, design spec, phases |
-| [`AGENTS.md`](AGENTS.md) | Context + golden rules for AI coding tools |
+## Built by
+
+**Ekansh Chaurasiya**
+[GitHub](https://github.com/PythonScript32/wapsi) ·
+[LinkedIn](https://linkedin.com/in/ekanshchaurasiya) ·
+[ekanshchaurasiya3@gmail.com](mailto:ekanshchaurasiya3@gmail.com)
 
 ---
 
