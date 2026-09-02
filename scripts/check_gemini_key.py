@@ -6,14 +6,18 @@ Answers one question: does this key actually work, right now, on the free tier?
 It does four things, in order, and stops at the first real failure:
   1. AUTH      — can the key talk to Google at all?
   2. MODELS    — which models can THIS key actually use? (no guessing model IDs)
-  3. TEXT      — a real generateContent call, the thing your agent will do
+  3. TEXT      — a real generate_content call, the thing your agent will do
   4. AUDIO     — optional multimodal test, for Hinglish voice notes
 
 Every failure is translated into a plain-language diagnosis, because Google's
 raw errors do not tell you which of the five possible problems you have.
 
+Uses the google-genai SDK (the successor to the deprecated
+google-generativeai package -- see app/llm/client.py for the same SDK used
+in the runtime pipeline).
+
 Usage:
-    pip install google-generativeai python-dotenv
+    pip install google-genai python-dotenv
     python scripts/check_gemini_key.py
     python scripts/check_gemini_key.py --audio path\\to\\voice.mp3
     python scripts/check_gemini_key.py --key AIza...        # test without .env
@@ -24,6 +28,7 @@ import argparse
 import os
 import re
 import sys
+from typing import Any
 
 try:
     from dotenv import load_dotenv
@@ -32,9 +37,10 @@ except ImportError:
     pass
 
 try:
-    import google.generativeai as genai
+    from google import genai
+    from google.genai import types
 except ImportError:
-    sys.exit("Missing dependency. Run:  pip install google-generativeai python-dotenv")
+    sys.exit("Missing dependency. Run:  pip install google-genai python-dotenv")
 
 
 OK, BAD, WARN, INFO = "[ OK ]", "[FAIL]", "[WARN]", "[ .. ]"
@@ -151,7 +157,7 @@ def _extract_text(resp: Any) -> str:
 
     cand = candidates[0]
     parts = getattr(getattr(cand, "content", None), "parts", None) or []
-    text = "".join(getattr(p, "text", "") for p in parts).strip()
+    text = "".join(getattr(p, "text", None) or "" for p in parts).strip()
 
     if text:
         return text
@@ -160,6 +166,10 @@ def _extract_text(resp: Any) -> str:
     fr_int = int(fr) if fr is not None else None
     explain = FINISH_REASONS.get(fr_int, f"unknown finish_reason={fr}")
     raise RuntimeError(f"Model returned no text. finish_reason={fr_int}: {explain}")
+
+
+def _generate_config() -> Any:
+    return types.GenerateContentConfig(max_output_tokens=512, temperature=0)
 
 
 def main() -> int:
@@ -179,15 +189,15 @@ def main() -> int:
     if not key.startswith("AIza"):
         print(f"{WARN} AI Studio keys normally start with 'AIza'. Check you copied the right value.")
 
-    genai.configure(api_key=key)
+    client = genai.Client(api_key=key)
 
     # ---- 1 & 2: AUTH + MODELS ------------------------------------------------
     print(f"\n{INFO} Checking auth and listing usable models...")
     try:
         usable = [
             m.name.replace("models/", "")
-            for m in genai.list_models()
-            if "generateContent" in m.supported_generation_methods
+            for m in client.models.list()
+            if "generateContent" in (m.supported_actions or [])
         ]
     except Exception as e:
         print(f"{BAD} Auth failed.\n     {diagnose(e)}\n\n     Raw: {e}")
@@ -211,10 +221,10 @@ def main() -> int:
     # response with no text part at all (finish_reason=2, MAX_TOKENS).
     # Always leave generous headroom.
     def _try(model_id: str) -> str:
-        model = genai.GenerativeModel(model_id)
-        resp = model.generate_content(
-            "Reply with exactly one word: WORKING",
-            generation_config={"max_output_tokens": 512, "temperature": 0},
+        resp = client.models.generate_content(
+            model=model_id,
+            contents="Reply with exactly one word: WORKING",
+            config=_generate_config(),
         )
         return _extract_text(resp)
 
@@ -244,14 +254,18 @@ def main() -> int:
         else:
             print(f"\n{INFO} Testing Hinglish audio understanding...")
             try:
-                uploaded = genai.upload_file(args.audio)
-                resp = model.generate_content([
-                    "Transcribe this Hinglish audio. Then on a new line, give the "
-                    "speaker's intent as one of: promise_to_pay, already_paid, "
-                    "opt_out, pay_now, dispute, unclear.",
-                    uploaded,
-                ])
-                print(f"{OK} Audio works. Response:\n{resp.text.strip()}")
+                uploaded = client.files.upload(file=args.audio)
+                resp = client.models.generate_content(
+                    model=target,
+                    contents=[
+                        "Transcribe this Hinglish audio. Then on a new line, give the "
+                        "speaker's intent as one of: promise_to_pay, already_paid, "
+                        "opt_out, pay_now, dispute, unclear.",
+                        uploaded,
+                    ],
+                    config=_generate_config(),
+                )
+                print(f"{OK} Audio works. Response:\n{_extract_text(resp)}")
             except Exception as e:
                 print(f"{WARN} Audio failed (text still works).\n     {diagnose(e)}\n\n     Raw: {e}")
 
