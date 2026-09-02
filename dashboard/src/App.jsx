@@ -11,6 +11,7 @@
 import { NavLink, Route, Routes } from 'react-router-dom'
 import { BatchProvider } from './lib/batchContext'
 import BatchSelector from './components/BatchSelector'
+import Footer from './components/Footer'
 import PipelineBoard from './components/PipelineBoard'
 import CaseDetailPage from './pages/CaseDetailPage'
 import MetricsPage from './pages/MetricsPage'
@@ -23,10 +24,10 @@ const NAV = [
 export default function App() {
   return (
     <BatchProvider>
-      <div className="min-h-screen">
+      <div className="flex min-h-screen flex-col">
         <header className="border-b border-line px-6 py-4 flex items-center gap-4">
           <h1 className="text-xl font-semibold tracking-tight">
-            वापसी <span className="text-muted font-normal">· Revenue Recovery</span>
+            वापसी <span className="text-muted font-normal">· Revenue Recovery AI Agent</span>
           </h1>
           <BatchSelector />
           <nav className="ml-auto flex gap-1">
@@ -36,7 +37,11 @@ export default function App() {
                 to={to}
                 end={end}
                 className={({ isActive }) =>
-                  `px-3 py-1.5 rounded-md text-sm ${isActive ? 'bg-panel text-white' : 'text-muted hover:text-white'}`
+                  `border-b-2 px-3 py-1.5 text-sm transition-colors ${
+                    isActive
+                      ? 'border-accent text-accent font-medium'
+                      : 'border-transparent text-muted hover:border-line hover:text-white'
+                  }`
                 }
               >
                 {label}
@@ -45,13 +50,15 @@ export default function App() {
           </nav>
         </header>
 
-        <main className="p-6">
+        <main className="flex-1 p-6">
           <Routes>
             <Route path="/" element={<PipelineBoard />} />
             <Route path="/cases/:caseId" element={<CaseDetailPage />} />
             <Route path="/metrics" element={<MetricsPage />} />
           </Routes>
         </main>
+
+        <Footer />
       </div>
     </BatchProvider>
   )
