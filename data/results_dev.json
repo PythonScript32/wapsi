@@ -328,7 +328,7 @@
       "reason_category": "expired_card",
       "state": "CLOSED_LOST",
       "amount": 799.0,
-      "attempts_made": 8
+      "attempts_made": 7
     },
     {
       "case_id": "case_6c378e5485a3",
@@ -468,10 +468,10 @@
   "kept_promise_kept_count": 3,
   "kept_promise_resolved_count": 11,
   "false_escalation_rate": 0.0,
-  "avg_time_to_recovery_days": 9.417944939178241,
-  "interventions_per_recovery": 5.16,
-  "cost_per_recovered_rupee": 0.002699762658227848,
-  "contact_efficiency": 0.23148148148148148,
+  "avg_time_to_recovery_days": 9.524956750300925,
+  "interventions_per_recovery": 5.14,
+  "cost_per_recovered_rupee": 0.002685917721518987,
+  "contact_efficiency": 0.23255813953488372,
   "double_charge_incidents": 0,
   "post_opt_out_contacts": 0,
   "actions_without_audit": 0,

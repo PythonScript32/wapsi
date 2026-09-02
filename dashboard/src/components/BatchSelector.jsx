@@ -2,9 +2,10 @@ import { BATCHES } from '../lib/batches'
 import { useBatch } from '../lib/batchContext'
 import { toneClasses } from '../lib/tones'
 
-// Lives in the header (App.jsx) so the choice is visible and reachable from
-// every screen. Shared BatchProvider state means switching here immediately
-// re-filters the Pipeline board and re-fetches the Metrics snapshot.
+// Lives in the header (Header.jsx) so the choice is visible and reachable
+// from every screen. Shared BatchProvider state means switching here
+// immediately re-filters the Pipeline board and re-fetches the Metrics
+// snapshot.
 export default function BatchSelector() {
   const { batchId, setBatchId } = useBatch()
   const tone = toneClasses('accent')
