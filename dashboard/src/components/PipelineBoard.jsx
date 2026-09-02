@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { AlertTriangle, CheckCircle2, Percent, TrendingUp, Wallet } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, ChevronRight, Percent, TrendingUp, Wallet } from 'lucide-react'
 import { supabase, subscribeToCases } from '../lib/supabase'
 import { CASE_STATES, TERMINAL_STATES, stateLabel, stateTone } from '../lib/caseStates'
 import { formatINR, formatPct } from '../lib/format'
@@ -7,6 +7,7 @@ import { toneClasses } from '../lib/tones'
 import { useBatch } from '../lib/batchContext'
 import StatCard from './StatCard'
 import CaseCard from './CaseCard'
+import PipelineStrip from './PipelineStrip'
 
 // Deliberately NOT select('*') -- cases.latent is synthetic ground truth
 // the pipeline itself is never allowed to read (see app/detection/
@@ -23,6 +24,12 @@ export default function PipelineBoard() {
   const [error, setError] = useState(null)
   const [justMoved, setJustMoved] = useState(() => new Set())
   const casesById = useRef(new Map())
+  const scrollRef = useRef(null)
+  // The "scroll ->" hint dismisses the first time the user scrolls the board
+  // themselves; canScrollRight is remeasured on every layout change so the
+  // edge fade only shows while there's actually more to see.
+  const [hasScrolled, setHasScrolled] = useState(false)
+  const [canScrollRight, setCanScrollRight] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -31,6 +38,7 @@ export default function PipelineBoard() {
     casesById.current = new Map()
     setCases(null)
     setError(null)
+    setHasScrolled(false)
     // Rows a Realtime event has already delivered before the initial fetch
     // resolves -- the fetch must not clobber those with a now-stale read.
     const seenViaRealtime = new Set()
@@ -88,6 +96,36 @@ export default function PipelineBoard() {
     }
   }, [batchId])
 
+  function measureScrollAffordance() {
+    const el = scrollRef.current
+    if (!el) return
+    setCanScrollRight(el.scrollWidth - el.clientWidth - el.scrollLeft > 4)
+  }
+
+  // After a completed batch, every case sits in a terminal column (Recovered
+  // / Escalated / Closed Lost); empty lifecycle columns aren't rendered at
+  // all (see the board below), so this mostly matters on narrow viewports --
+  // auto-scroll so the populated columns are what a first-time viewer
+  // actually sees, rather than whatever fits first.
+  useEffect(() => {
+    if (!cases) return
+    const el = scrollRef.current
+    if (!el) return
+    const id = requestAnimationFrame(() => {
+      const allTerminal = cases.length > 0 && cases.every((c) => TERMINAL_STATES.has(c.state))
+      if (allTerminal) {
+        el.scrollTo({ left: el.scrollWidth - el.clientWidth, behavior: 'smooth' })
+      }
+      measureScrollAffordance()
+    })
+    return () => cancelAnimationFrame(id)
+  }, [cases])
+
+  useEffect(() => {
+    window.addEventListener('resize', measureScrollAffordance)
+    return () => window.removeEventListener('resize', measureScrollAffordance)
+  }, [])
+
   const stats = useMemo(() => {
     if (!cases) return null
     const atRisk = cases.reduce((sum, c) => sum + Number(c.amount || 0), 0)
@@ -117,6 +155,13 @@ export default function PipelineBoard() {
     }
     return byState
   }, [cases])
+
+  // Feeds the always-visible PipelineStrip -- null (not zeros) while still
+  // loading, so the strip can show "—" instead of a misleading "0".
+  const counts = useMemo(() => {
+    if (!cases) return null
+    return new Map(CASE_STATES.map((s) => [s, columns.get(s)?.length || 0]))
+  }, [cases, columns])
 
   if (error) {
     return (
@@ -158,13 +203,44 @@ export default function PipelineBoard() {
         />
       </div>
 
+      <PipelineStrip counts={counts} loading={!cases} />
+
       {cases && cases.length === 0 ? (
         <EmptyBoard />
       ) : (
-        <div className="flex gap-4 overflow-x-auto pb-2">
-          {CASE_STATES.map((state) => (
-            <Column key={state} state={state} cases={cases ? columns.get(state) : null} justMoved={justMoved} />
-          ))}
+        <div className="relative">
+          <div
+            ref={scrollRef}
+            onScroll={() => {
+              setHasScrolled(true)
+              measureScrollAffordance()
+            }}
+            className="flex gap-4 overflow-x-auto pb-2"
+          >
+            {CASE_STATES.map((state) => {
+              const stateCases = cases ? columns.get(state) : null
+              // A stage with 0 cases isn't rendered at all -- PipelineStrip
+              // above is what keeps it part of the visible story. Still
+              // showing a skeleton for every stage while the initial fetch
+              // is in flight (stateCases === null), since we don't yet know
+              // which ones are actually empty.
+              if (stateCases !== null && stateCases.length === 0) {
+                return null
+              }
+              return <Column key={state} state={state} cases={stateCases} justMoved={justMoved} />
+            })}
+          </div>
+
+          {canScrollRight && (
+            <div className="pointer-events-none absolute inset-y-0 right-0 flex w-16 items-center justify-end bg-gradient-to-l from-ink to-transparent pb-2">
+              {!hasScrolled && (
+                <span className="mr-1 flex animate-pulse items-center gap-0.5 rounded-full border border-line bg-panel px-2 py-1 text-[11px] font-medium text-accent shadow-lg">
+                  Scroll
+                  <ChevronRight className="h-3 w-3" />
+                </span>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>

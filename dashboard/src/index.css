@@ -13,3 +13,13 @@ body { @apply bg-ink text-slate-100 font-sans antialiased; }
   100% { transform: scale(1); opacity: 1; }
 }
 .animate-card-pop { animation: card-pop 0.5s ease-out; }
+
+/* Case card "details" affordance: dim by default, fully hidden until hover
+   on devices that actually support hovering (so it doesn't get stuck "on"
+   after a tap), permanently dim on touch devices where there is no hover to
+   reveal it. */
+.case-card-chevron { opacity: 0.4; transition: opacity 150ms ease; }
+@media (hover: hover) {
+  .case-card-chevron { opacity: 0; }
+  .group:hover .case-card-chevron { opacity: 1; }
+}

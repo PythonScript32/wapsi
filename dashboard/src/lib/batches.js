@@ -5,15 +5,21 @@
 export const BATCHES = [
   {
     id: 'holdout',
-    label: 'Holdout (300)',
+    label: 'Holdout · 300 cases',
     size: 300,
     description: 'Held-out set · 300 cases · run once, never tuned against',
+    // Shown under the header's batch selector -- the strongest credibility
+    // signal in the project, so it has to explain itself to a viewer who has
+    // never heard the term "holdout set" before.
+    explainer:
+      '300 cases held back during the whole build and run exactly once — these are the reported numbers.',
   },
   {
     id: 'dev',
-    label: 'Dev (100)',
+    label: 'Dev · 100 cases',
     size: 100,
     description: 'Dev set · 100 cases · used for tuning during the build',
+    explainer: '100 cases used while building and tuning the agent.',
   },
 ]
 
