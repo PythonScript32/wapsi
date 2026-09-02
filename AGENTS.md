@@ -5,7 +5,7 @@ AI Buildathon (Track 3). Read this fully before writing code. Both Claude Code
 and OpenCode read this file — it is the single source of truth that keeps output
 consistent across tools, models, and sessions.
 
-Deeper detail lives in `PRD.md`. Setup lives in `SETUP.md`.
+Deeper detail lives in `PRD.md`. Setup lives in `docs/SETUP.md`.
 
 ---
 

@@ -181,7 +181,7 @@ uvicorn app.main:app --reload --port 8000  # backend
 cd dashboard && npm install && npm run dev # dashboard -> :5173
 ```
 
-Full walkthrough — accounts, installs, git, tooling — in [`SETUP.md`](SETUP.md).
+Full walkthrough — accounts, install, database, tests — in [`docs/SETUP.md`](docs/SETUP.md).
 
 ## Built by
 
