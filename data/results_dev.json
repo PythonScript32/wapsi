@@ -108,9 +108,9 @@
   },
   "gate_block_counts": {
     "G2": 5,
-    "G10": 40,
-    "G3": 16,
-    "G5": 17
+    "G10": 18,
+    "G3": 14,
+    "G5": 19
   },
   "exception_list": [
     {
@@ -146,14 +146,14 @@
       "reason_category": "bank_downtime",
       "state": "CLOSED_LOST",
       "amount": 1999.0,
-      "attempts_made": 2
+      "attempts_made": 1
     },
     {
       "case_id": "case_1860d05c4396",
       "reason_category": "insufficient_funds",
       "state": "CLOSED_LOST",
       "amount": 799.0,
-      "attempts_made": 8
+      "attempts_made": 6
     },
     {
       "case_id": "case_1af48cdb975e",
@@ -174,7 +174,7 @@
       "reason_category": "expired_card",
       "state": "CLOSED_LOST",
       "amount": 299.0,
-      "attempts_made": 6
+      "attempts_made": 4
     },
     {
       "case_id": "case_3e8e911f0d3a",
@@ -202,7 +202,7 @@
       "reason_category": "mandate_revoked",
       "state": "CLOSED_LOST",
       "amount": 1499.0,
-      "attempts_made": 7
+      "attempts_made": 5
     },
     {
       "case_id": "case_9eef217a1abe",
@@ -230,7 +230,7 @@
       "reason_category": "mandate_revoked",
       "state": "CLOSED_LOST",
       "amount": 129.0,
-      "attempts_made": 8
+      "attempts_made": 6
     },
     {
       "case_id": "case_4a050b14c6c1",
@@ -263,16 +263,16 @@
     {
       "case_id": "case_09043fa9ce78",
       "reason_category": "bank_downtime",
-      "state": "ESCALATED",
+      "state": "CLOSED_LOST",
       "amount": 249.0,
-      "attempts_made": 3
+      "attempts_made": 2
     },
     {
       "case_id": "case_b57c8cf3b990",
       "reason_category": "insufficient_funds",
       "state": "CLOSED_LOST",
       "amount": 999.0,
-      "attempts_made": 8
+      "attempts_made": 6
     },
     {
       "case_id": "case_0d22ccfcaff6",
@@ -293,7 +293,7 @@
       "reason_category": "expired_card",
       "state": "CLOSED_LOST",
       "amount": 129.0,
-      "attempts_made": 6
+      "attempts_made": 4
     },
     {
       "case_id": "case_c9dd071ab3b4",
@@ -307,7 +307,7 @@
       "reason_category": "insufficient_funds",
       "state": "CLOSED_LOST",
       "amount": 499.0,
-      "attempts_made": 6
+      "attempts_made": 5
     },
     {
       "case_id": "case_b0ae1fb50133",
@@ -321,14 +321,14 @@
       "reason_category": "insufficient_funds",
       "state": "CLOSED_LOST",
       "amount": 799.0,
-      "attempts_made": 6
+      "attempts_made": 4
     },
     {
       "case_id": "case_6b55c7ceb12f",
       "reason_category": "expired_card",
       "state": "CLOSED_LOST",
       "amount": 799.0,
-      "attempts_made": 7
+      "attempts_made": 5
     },
     {
       "case_id": "case_6c378e5485a3",
@@ -377,14 +377,14 @@
       "reason_category": "expired_card",
       "state": "CLOSED_LOST",
       "amount": 799.0,
-      "attempts_made": 7
+      "attempts_made": 5
     },
     {
       "case_id": "case_6041a599206d",
       "reason_category": "expired_card",
       "state": "CLOSED_LOST",
       "amount": 499.0,
-      "attempts_made": 6
+      "attempts_made": 4
     },
     {
       "case_id": "case_baf6a3bde0b0",
@@ -412,14 +412,14 @@
       "reason_category": "insufficient_funds",
       "state": "CLOSED_LOST",
       "amount": 99.0,
-      "attempts_made": 7
+      "attempts_made": 5
     },
     {
       "case_id": "case_f2639ad7dcf6",
       "reason_category": "insufficient_funds",
       "state": "CLOSED_LOST",
       "amount": 249.0,
-      "attempts_made": 7
+      "attempts_made": 5
     },
     {
       "case_id": "case_f75f37bbe6a9",
@@ -440,38 +440,38 @@
       "reason_category": "expired_card",
       "state": "CLOSED_LOST",
       "amount": 799.0,
-      "attempts_made": 6
+      "attempts_made": 4
     },
     {
       "case_id": "case_58c3a4b65ca9",
       "reason_category": "bank_downtime",
-      "state": "ESCALATED",
+      "state": "CLOSED_LOST",
       "amount": 249.0,
-      "attempts_made": 3
+      "attempts_made": 2
     },
     {
       "case_id": "case_98f42483be61",
       "reason_category": "insufficient_funds",
       "state": "CLOSED_LOST",
       "amount": 129.0,
-      "attempts_made": 6
+      "attempts_made": 4
     },
     {
       "case_id": "case_0e8b87430157",
       "reason_category": "mandate_revoked",
       "state": "CLOSED_LOST",
       "amount": 999.0,
-      "attempts_made": 5
+      "attempts_made": 3
     }
   ],
   "kept_promise_rate": 0.2727272727272727,
   "kept_promise_kept_count": 3,
   "kept_promise_resolved_count": 11,
   "false_escalation_rate": 0.0,
-  "avg_time_to_recovery_days": 9.91002067201389,
-  "interventions_per_recovery": 5.02,
-  "cost_per_recovered_rupee": 0.002616693037974683,
-  "contact_efficiency": 0.23809523809523808,
+  "avg_time_to_recovery_days": 11.528632681898149,
+  "interventions_per_recovery": 4.22,
+  "cost_per_recovered_rupee": 0.002104430379746835,
+  "contact_efficiency": 0.28901734104046245,
   "double_charge_incidents": 0,
   "post_opt_out_contacts": 0,
   "actions_without_audit": 0,

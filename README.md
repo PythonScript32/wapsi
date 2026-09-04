@@ -11,7 +11,7 @@ tuned against.
 
 Built for the **Razorpay AI Buildathon · Track 3 (AI Revenue Recovery)**.
 
-**[Live dashboard](https://wapsi-sigma.vercel.app/)** · **[Demo video](#)** *(to come)* · **[Repository](https://github.com/PythonScript32/wapsi)**
+**[Live dashboard](https://wapsi-sigma.vercel.app/)** · **[Demo video (5 min)](https://youtu.be/MC4RBl8JAl4?si=T6E2XetDlg6QNF5v)** · **[Repository](https://github.com/PythonScript32/wapsi)**
 
 ---
 
